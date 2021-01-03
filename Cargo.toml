@@ -1,0 +1,10 @@
+[package]
+name = "parallel-hashlife"
+version = "0.1.0"
+authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
+edition = "2018"
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/programmerjake/parallel-hashlife-4"
+description = "Parallel/Multithreaded 1D/2D/3D Hashlife algorithm"
+
+[dependencies]
