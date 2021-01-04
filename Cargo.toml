@@ -8,3 +8,7 @@ repository = "https://github.com/programmerjake/parallel-hashlife-4"
 description = "Parallel/Multithreaded 1D/2D/3D Hashlife algorithm"
 
 [dependencies]
+
+[dev-dependencies]
+typed-arena = "2.0.1"
+send_wrapper = "0.5.0"
