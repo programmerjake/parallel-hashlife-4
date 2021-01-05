@@ -1,79 +1,17 @@
 use std::{
-    fmt::Debug,
-    ops::{Add, Index, IndexMut, RangeTo},
+    fmt::{self, Debug},
+    hash::{Hash, Hasher},
+    mem::MaybeUninit,
+    ops::{Index, IndexMut, RangeTo},
 };
 
-pub trait NodeId: Copy + Debug + Send + Sync + Default {}
+mod arrayvec;
+use arrayvec::ArrayVec;
+pub mod array;
+pub mod index_vec;
 
-pub trait IndexVec: Copy + Debug + Send + Sync + Add<Output = Self> + From<usize> {
-    fn try_map<E>(self, f: impl FnMut(usize) -> Result<usize, E>) -> Result<Self, E>;
-    fn map(self, mut f: impl FnMut(usize) -> usize) -> Self {
-        self.try_map(|v| Ok::<_, ()>(f(v))).unwrap()
-    }
-}
-
-macro_rules! impl_index_vec {
-    ($name:ident, $n:literal $(, $prev_name:ident)?) => {
-        #[derive(Clone, Copy, Debug, Hash)]
-        pub struct $name([usize; $n]);
-
-        $(
-            impl $name {
-                pub fn first(self) -> usize {
-                    self.0[0]
-                }
-                pub fn rest(self) -> $prev_name {
-                    let mut retval = [0; $n - 1];
-                    for i in 1..$n {
-                        retval[i - 1] = self.0[i];
-                    }
-                    $prev_name(retval)
-                }
-                pub fn combine(first: usize, rest: $prev_name) -> Self {
-                    let mut retval = [0; $n];
-                    retval[0] = first;
-                    for i in 1..$n {
-                        retval[i] = rest.0[i - 1];
-                    }
-                    Self(retval)
-                }
-            }
-        )?
-
-        impl From<usize> for $name {
-            fn from(v: usize) -> Self {
-                Self([v; $n])
-            }
-        }
-
-        impl Add for $name {
-            type Output = Self;
-            fn add(self, rhs: Self) -> Self {
-                let mut retval = [0; $n];
-                for i in 0..$n {
-                    retval[i] = self.0[i] + rhs.0[i];
-                }
-                Self(retval)
-            }
-        }
-
-        impl IndexVec for $name {
-            fn try_map<E>(self, mut f: impl FnMut(usize) -> Result<usize, E>) -> Result<Self, E> {
-                let mut retval = [0; $n];
-                for i in 0..$n {
-                    retval[i] = f(self.0[i])?;
-                }
-                Ok(Self(retval))
-            }
-        }
-    };
-}
-
-impl_index_vec!(IndexVec0D, 0);
-impl_index_vec!(IndexVec1D, 1, IndexVec0D);
-impl_index_vec!(IndexVec2D, 2, IndexVec1D);
-impl_index_vec!(IndexVec3D, 3, IndexVec2D);
-impl_index_vec!(IndexVec4D, 4, IndexVec3D);
+/*
+pub trait NodeId: Copy + Debug + Send + Sync {}
 
 pub trait Array<IV: IndexVec, T: Copy + Debug + Send + Sync + Default>:
     Copy + Debug + Send + Sync + Index<IV, Output = T> + IndexMut<IV> + Default
@@ -188,6 +126,7 @@ pub trait ParArray<
 
 pub trait HashlifeData: Send + Sync {
     type NodeId: NodeId;
+    type LeafData: Copy + Send + Sync + Debug;
     type IndexVec: IndexVec;
     type Error: Debug + Send;
     type Array2: ParArray<Self::IndexVec, Self::NodeId, Self, Error = Self::Error>;
@@ -471,3 +410,4 @@ mod test {
         }
     }
 }
+*/
