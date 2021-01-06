@@ -1,12 +1,10 @@
-use std::{
+use core::{
     fmt,
     iter::FusedIterator,
-    mem::{self, MaybeUninit},
+    mem::{self, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut, Range},
     ptr, slice,
 };
-
-use mem::ManuallyDrop;
 
 pub struct ArrayVec<T, const N: usize> {
     data: MaybeUninit<[T; N]>,

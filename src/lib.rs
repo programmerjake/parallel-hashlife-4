@@ -1,413 +1,217 @@
-use std::{
-    fmt::{self, Debug},
-    hash::{Hash, Hasher},
-    mem::MaybeUninit,
-    ops::{Index, IndexMut, RangeTo},
-};
+#![cfg_attr(not(test), no_std)]
+use array::{Array, ArrayRepr};
+use core::{fmt::Debug, hash::Hash};
+use index_vec::{IndexVec, IndexVecExt};
 
-mod arrayvec;
-use arrayvec::ArrayVec;
+extern crate alloc;
+
 pub mod array;
+mod arrayvec;
 pub mod index_vec;
+pub mod parallel;
+pub mod serial;
+pub mod simple;
 
-/*
-pub trait NodeId: Copy + Debug + Send + Sync {}
+pub trait HasErrorType {
+    type Error;
+}
 
-pub trait Array<IV: IndexVec, T: Copy + Debug + Send + Sync + Default>:
-    Copy + Debug + Send + Sync + Index<IV, Output = T> + IndexMut<IV> + Default
+impl<T: ?Sized + HasErrorType> HasErrorType for &'_ T {
+    type Error = T::Error;
+}
+
+pub trait HasNodeType<const DIMENSION: usize>
+where
+    Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
-    fn try_build_array<E>(f: impl FnMut(IV) -> Result<T, E>) -> Result<Self, E>;
-    fn build_array(mut f: impl FnMut(IV) -> T) -> Self {
-        Self::try_build_array(|index_vec| Ok::<T, ()>(f(index_vec))).unwrap()
-    }
-    fn try_for_each_indexed<E>(self, f: impl FnMut(IV, T) -> Result<(), E>) -> Result<(), E>;
-    fn try_for_each<E>(self, mut f: impl FnMut(T) -> Result<(), E>) -> Result<(), E> {
-        self.try_for_each_indexed(|_, v| f(v))
-    }
-    fn for_each_indexed(self, mut f: impl FnMut(IV, T)) {
-        self.try_for_each_indexed(|index_vec, v| Ok::<(), ()>(f(index_vec, v)))
-            .unwrap()
-    }
-    fn for_each(self, mut f: impl FnMut(T)) {
-        self.try_for_each_indexed(|_, v| Ok::<(), ()>(f(v)))
-            .unwrap()
-    }
+    type NodeId: Clone + Debug + ArrayRepr<3, DIMENSION> + ArrayRepr<2, DIMENSION>;
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
-#[repr(transparent)]
-pub struct Array0D<T>(T);
-
-impl<T> Index<IndexVec0D> for Array0D<T> {
-    type Output = T;
-    fn index(&self, _: IndexVec0D) -> &Self::Output {
-        &self.0
-    }
-}
-
-impl<T> IndexMut<IndexVec0D> for Array0D<T> {
-    fn index_mut(&mut self, _: IndexVec0D) -> &mut Self::Output {
-        &mut self.0
-    }
-}
-
-impl<T: Copy + Debug + Send + Sync + Default> Array<IndexVec0D, T> for Array0D<T> {
-    fn try_build_array<E>(mut f: impl FnMut(IndexVec0D) -> Result<T, E>) -> Result<Self, E> {
-        Ok(Array0D(f(0.into())?))
-    }
-    fn try_for_each_indexed<E>(
-        self,
-        mut f: impl FnMut(IndexVec0D, T) -> Result<(), E>,
-    ) -> Result<(), E> {
-        f(0.into(), self.0)
-    }
-}
-
-macro_rules! impl_array {
-    ($array:ident, $n:literal, $index_vec:ident, $prev_array:ident, [$($indexes:literal),+]) => {
-        #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
-        #[repr(transparent)]
-        pub struct $array<T>([$prev_array<T>; $n]);
-
-        impl<T> Index<$index_vec> for $array<T> {
-            type Output = T;
-            fn index(&self, index: $index_vec) -> &Self::Output {
-                &self.0[index.first()][index.rest()]
-            }
-        }
-
-        impl<T> IndexMut<$index_vec> for $array<T> {
-            fn index_mut(&mut self, index: $index_vec) -> &mut Self::Output {
-                &mut self.0[index.first()][index.rest()]
-            }
-        }
-
-        impl<T: Copy + Debug + Send + Sync + Default> Array<$index_vec, T> for $array<T> {
-            fn try_build_array<E>(
-                mut f: impl FnMut($index_vec) -> Result<T, E>,
-            ) -> Result<Self, E> {
-                Ok(Self([
-                    $(
-                        $prev_array::<T>::try_build_array(|i| f($index_vec::combine($indexes, i)))?,
-                    )+
-                ]))
-            }
-            fn try_for_each_indexed<E>(self, mut f: impl FnMut($index_vec, T) -> Result<(), E>) -> Result<(), E> {
-                for i in 0..$n {
-                    self.0[i].try_for_each_indexed(|index_vec, v| f($index_vec::combine(i, index_vec), v))?;
-                }
-                Ok(())
-            }
-        }
-    };
-}
-
-impl_array!(Array2, 2, IndexVec1D, Array0D, [0, 1]);
-impl_array!(Array3, 3, IndexVec1D, Array0D, [0, 1, 2]);
-impl_array!(Array2x2, 2, IndexVec2D, Array2, [0, 1]);
-impl_array!(Array3x3, 3, IndexVec2D, Array3, [0, 1, 2]);
-impl_array!(Array2x2x2, 2, IndexVec3D, Array2x2, [0, 1]);
-impl_array!(Array3x3x3, 3, IndexVec3D, Array3x3, [0, 1, 2]);
-impl_array!(Array2x2x2x2, 2, IndexVec4D, Array2x2x2, [0, 1]);
-impl_array!(Array3x3x3x3, 3, IndexVec4D, Array3x3x3, [0, 1, 2]);
-
-pub trait ParArray<
-    IV: IndexVec,
-    T: Copy + Debug + Send + Sync + Default,
-    ParallelBuilder: Send + Sync + ?Sized,
->: Array<IV, T>
+impl<T, const DIMENSION: usize> HasNodeType<DIMENSION> for &'_ T
+where
+    T: ?Sized + HasNodeType<DIMENSION>,
+    Array<T::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
-    type Error: Debug + Send;
-    fn parallel_build_array(
-        parallel_builder: &ParallelBuilder,
-        f: impl Fn(IV) -> Result<T, Self::Error> + Send,
-    ) -> Result<Self, Self::Error>;
+    type NodeId = T::NodeId;
 }
 
-pub trait HashlifeData: Send + Sync {
-    type NodeId: NodeId;
-    type LeafData: Copy + Send + Sync + Debug;
-    type IndexVec: IndexVec;
-    type Error: Debug + Send;
-    type Array2: ParArray<Self::IndexVec, Self::NodeId, Self, Error = Self::Error>;
-    type Array3: ParArray<Self::IndexVec, Self::NodeId, Self, Error = Self::Error>;
-    type Array2OfArray2: ParArray<Self::IndexVec, Self::Array2, Self, Error = Self::Error>;
-    fn intern_node(&self, key: Self::Array2, level: usize) -> Result<Self::NodeId, Self::Error>;
-    fn get_node_key(&self, node: Self::NodeId, level: usize) -> Self::Array2;
-    fn get_or_compute_node_next(
+pub trait HasLeafType<const DIMENSION: usize>
+where
+    Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+{
+    type Leaf: Clone + Debug + Default + ArrayRepr<3, DIMENSION> + ArrayRepr<2, DIMENSION>;
+}
+
+impl<T, const DIMENSION: usize> HasLeafType<DIMENSION> for &'_ T
+where
+    T: ?Sized + HasLeafType<DIMENSION>,
+    Array<T::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+{
+    type Leaf = T::Leaf;
+}
+
+pub trait LeafStep<const DIMENSION: usize>: HasLeafType<DIMENSION> + HasErrorType
+where
+    Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+{
+    fn leaf_step(
         &self,
-        node: Self::NodeId,
+        neighborhood: Array<Self::Leaf, 3, DIMENSION>,
+    ) -> Result<Self::Leaf, Self::Error>;
+}
+
+impl<T, const DIMENSION: usize> LeafStep<DIMENSION> for &'_ T
+where
+    T: ?Sized + LeafStep<DIMENSION>,
+    Array<T::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+{
+    fn leaf_step(
+        &self,
+        neighborhood: Array<Self::Leaf, 3, DIMENSION>,
+    ) -> Result<Self::Leaf, Self::Error> {
+        (**self).leaf_step(neighborhood)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum NodeOrLeaf<Node, Leaf> {
+    Node(Node),
+    Leaf(Leaf),
+}
+
+impl<Node, Leaf> NodeOrLeaf<Node, Leaf> {
+    pub const fn as_ref(&self) -> NodeOrLeaf<&Node, &Leaf> {
+        match self {
+            NodeOrLeaf::Node(v) => NodeOrLeaf::Node(v),
+            NodeOrLeaf::Leaf(v) => NodeOrLeaf::Leaf(v),
+        }
+    }
+    pub fn as_mut(&mut self) -> NodeOrLeaf<&mut Node, &mut Leaf> {
+        match self {
+            NodeOrLeaf::Node(v) => NodeOrLeaf::Node(v),
+            NodeOrLeaf::Leaf(v) => NodeOrLeaf::Leaf(v),
+        }
+    }
+    pub const fn is_node(&self) -> bool {
+        matches!(self, NodeOrLeaf::Node(_))
+    }
+    pub const fn is_leaf(&self) -> bool {
+        matches!(self, NodeOrLeaf::Leaf(_))
+    }
+    pub fn node(self) -> Option<Node> {
+        match self {
+            NodeOrLeaf::Node(v) => Some(v),
+            NodeOrLeaf::Leaf(_) => None,
+        }
+    }
+    pub fn leaf(self) -> Option<Leaf> {
+        match self {
+            NodeOrLeaf::Leaf(v) => Some(v),
+            NodeOrLeaf::Node(_) => None,
+        }
+    }
+    pub fn map_node<T, F: FnOnce(Node) -> T>(self, f: F) -> NodeOrLeaf<T, Leaf> {
+        match self {
+            NodeOrLeaf::Node(v) => NodeOrLeaf::Node(f(v)),
+            NodeOrLeaf::Leaf(v) => NodeOrLeaf::Leaf(v),
+        }
+    }
+    pub fn map_leaf<T, F: FnOnce(Leaf) -> T>(self, f: F) -> NodeOrLeaf<Node, T> {
+        match self {
+            NodeOrLeaf::Node(v) => NodeOrLeaf::Node(v),
+            NodeOrLeaf::Leaf(v) => NodeOrLeaf::Leaf(f(v)),
+        }
+    }
+}
+
+pub trait HashlifeData<const DIMENSION: usize>:
+    HasErrorType + LeafStep<DIMENSION> + HasNodeType<DIMENSION>
+where
+    IndexVec<DIMENSION>: IndexVecExt,
+    Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+{
+    fn intern_node(
+        &self,
+        key: NodeOrLeaf<Array<Self::NodeId, 2, DIMENSION>, Array<Self::Leaf, 2, DIMENSION>>,
         level: usize,
-        compute_next_nonleaf: impl FnOnce() -> Result<Self::NodeId, Self::Error>,
     ) -> Result<Self::NodeId, Self::Error>;
-}
-
-pub trait HashlifeDataExt: HashlifeData {
-    fn recursive_hashlife_compute_node_next(
+    fn get_node_key(
         &self,
         node: Self::NodeId,
         level: usize,
-        double_step_levels: RangeTo<usize>,
+    ) -> NodeOrLeaf<Array<Self::NodeId, 2, DIMENSION>, Array<Self::Leaf, 2, DIMENSION>>;
+    fn get_node_next(&self, node: Self::NodeId, level: usize) -> Option<Self::NodeId>;
+    fn fill_node_next(&self, node: Self::NodeId, level: usize, new_next: Self::NodeId);
+    fn get_empty_node(&self, level: usize) -> Result<Self::NodeId, Self::Error>;
+    fn expand_root(&self, node: Self::NodeId, level: usize) -> Result<Self::NodeId, Self::Error> {
+        match self.get_node_key(node, level) {
+            NodeOrLeaf::Leaf(node_key) => {
+                assert_eq!(level, 0);
+                let final_key =
+                    Array::try_build_array(|outer_index| -> Result<Self::NodeId, Self::Error> {
+                        let key = Array::build_array(|inner_index| {
+                            if outer_index.map(|v| 1 - v) == inner_index {
+                                node_key[outer_index].clone()
+                            } else {
+                                Self::Leaf::default()
+                            }
+                        });
+                        self.intern_node(NodeOrLeaf::Leaf(key), 0)
+                    })?;
+                self.intern_node(NodeOrLeaf::Node(final_key), 1)
+            }
+            NodeOrLeaf::Node(node_key) => {
+                assert_ne!(level, 0);
+                let empty_node = self.get_empty_node(level - 1)?;
+                let final_key =
+                    Array::try_build_array(|outer_index| -> Result<Self::NodeId, Self::Error> {
+                        let key = Array::build_array(|inner_index| {
+                            if outer_index.map(|v| 1 - v) == inner_index {
+                                node_key[outer_index].clone()
+                            } else {
+                                empty_node.clone()
+                            }
+                        });
+                        self.intern_node(NodeOrLeaf::Node(key), level)
+                    })?;
+                self.intern_node(NodeOrLeaf::Node(final_key), level + 1)
+            }
+        }
+    }
+}
+
+impl<T, const DIMENSION: usize> HashlifeData<DIMENSION> for &T
+where
+    T: ?Sized + HashlifeData<DIMENSION>,
+    IndexVec<DIMENSION>: IndexVecExt,
+    Array<T::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<T::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+{
+    fn intern_node(
+        &self,
+        key: NodeOrLeaf<Array<Self::NodeId, 2, DIMENSION>, Array<Self::Leaf, 2, DIMENSION>>,
+        level: usize,
     ) -> Result<Self::NodeId, Self::Error> {
-        self.get_or_compute_node_next(node, level, || -> Result<Self::NodeId, Self::Error> {
-            if double_step_levels.contains(&level) {
-                let node_key = self.get_node_key(node, level);
-                let node_key_keys = Self::Array2OfArray2::build_array(|index_vec| {
-                    self.get_node_key(node_key[index_vec], level)
-                });
-                let step1 = Self::Array3::parallel_build_array(
-                    self,
-                    |index_vec3| -> Result<Self::NodeId, Self::Error> {
-                        let key = Self::Array2::build_array(|index_vec2| {
-                            let sum_vec: Self::IndexVec = index_vec3 + index_vec2;
-                            let sum_div2 = sum_vec.map(|v| v / 2);
-                            let sum_mod2 = sum_vec.map(|v| v % 2);
-                            node_key_keys[sum_div2][sum_mod2]
-                        });
-                        let temp = self.intern_node(key, level - 1)?;
-                        self.recursive_hashlife_compute_node_next(
-                            temp,
-                            level - 1,
-                            double_step_levels,
-                        )
-                    },
-                )?;
-                let final_key = Self::Array2::parallel_build_array(
-                    self,
-                    |outer_index| -> Result<Self::NodeId, Self::Error> {
-                        let key = Self::Array2::build_array(|inner_index| {
-                            step1[outer_index + inner_index]
-                        });
-                        let temp = self.intern_node(key, level - 1)?;
-                        self.recursive_hashlife_compute_node_next(
-                            temp,
-                            level - 1,
-                            double_step_levels,
-                        )
-                    },
-                )?;
-                self.intern_node(final_key, level - 1)
-            } else {
-                todo!()
-            }
-        })
+        (**self).intern_node(key, level)
+    }
+    fn get_node_key(
+        &self,
+        node: Self::NodeId,
+        level: usize,
+    ) -> NodeOrLeaf<Array<Self::NodeId, 2, DIMENSION>, Array<Self::Leaf, 2, DIMENSION>> {
+        (**self).get_node_key(node, level)
+    }
+    fn get_node_next(&self, node: Self::NodeId, level: usize) -> Option<Self::NodeId> {
+        (**self).get_node_next(node, level)
+    }
+    fn fill_node_next(&self, node: Self::NodeId, level: usize, new_next: Self::NodeId) {
+        (**self).fill_node_next(node, level, new_next)
+    }
+    fn get_empty_node(&self, level: usize) -> Result<Self::NodeId, Self::Error> {
+        (**self).get_empty_node(level)
+    }
+    fn expand_root(&self, node: Self::NodeId, level: usize) -> Result<Self::NodeId, Self::Error> {
+        (**self).expand_root(node, level)
     }
 }
-
-impl<T: HashlifeData + ?Sized> HashlifeDataExt for T {}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use send_wrapper::SendWrapper;
-    use std::{
-        cell::{Cell, RefCell},
-        collections::{hash_map::Entry, HashMap, HashSet},
-        hash::{Hash, Hasher},
-    };
-    use typed_arena::Arena;
-
-    #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
-    enum Leaf {
-        Empty,
-        Value(u32),
-    }
-
-    impl Leaf {
-        fn step(neighborhood: Array3x3<Self>) -> Self {
-            match neighborhood[IndexVec2D([1, 1])] {
-                Leaf::Empty => neighborhood[IndexVec2D([0, 1])],
-                Leaf::Value(v) => match neighborhood[IndexVec2D([1, 2])] {
-                    Leaf::Empty => Leaf::Value(v + 1),
-                    Leaf::Value(v2) => Leaf::Value(v + v2 + 1),
-                },
-            }
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct NodeData<'a> {
-        key: Array2x2<NodeRef<'a>>,
-        next: SendWrapper<Cell<Option<NodeRef<'a>>>>,
-        level: u8,
-        id: u32,
-    }
-
-    impl PartialEq for NodeData<'_> {
-        fn eq(&self, rhs: &Self) -> bool {
-            self.key == rhs.key
-        }
-    }
-
-    impl Eq for NodeData<'_> {}
-
-    impl Hash for NodeData<'_> {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.key.hash(state);
-        }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    enum Node<'a> {
-        Leaf(Leaf),
-        Node(NodeData<'a>),
-    }
-
-    impl Node<'_> {
-        fn next_level(&self) -> usize {
-            match self {
-                Node::Leaf(_) => 0,
-                Node::Node(node) => node.level as usize + 1,
-            }
-        }
-    }
-
-    #[derive(Copy, Clone, Debug, Eq)]
-    struct NodeRef<'a>(&'a Node<'a>);
-
-    impl Default for NodeRef<'_> {
-        fn default() -> Self {
-            NodeRef(&Node::Leaf(Leaf::Empty))
-        }
-    }
-
-    impl PartialEq for NodeRef<'_> {
-        fn eq(&self, rhs: &Self) -> bool {
-            match (&self.0, &rhs.0) {
-                (Node::Leaf(lhs), Node::Leaf(rhs)) => lhs == rhs,
-                (Node::Node(lhs), Node::Node(rhs)) => lhs.id == rhs.id,
-                _ => false,
-            }
-        }
-    }
-
-    impl Hash for NodeRef<'_> {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            match &self.0 {
-                Node::Leaf(v) => {
-                    0u8.hash(state);
-                    v.hash(state);
-                }
-                Node::Node(v) => {
-                    1u8.hash(state);
-                    v.id.hash(state);
-                }
-            }
-        }
-    }
-
-    impl NodeId for NodeRef<'_> {}
-
-    struct TestDataImpl<'a> {
-        node_arena: &'a Arena<Node<'a>>,
-        next_node: Option<&'a mut Node<'a>>,
-        next_id: u32,
-        hash_set: HashSet<&'a Node<'a>>,
-    }
-
-    type TestData<'a> = SendWrapper<RefCell<TestDataImpl<'a>>>;
-
-    impl<'a> ParArray<IndexVec2D, NodeRef<'a>, TestData<'a>> for Array2x2<NodeRef<'a>> {
-        type Error = ();
-        fn parallel_build_array(
-            _parallel_builder: &TestData<'a>,
-            f: impl Fn(IndexVec2D) -> Result<NodeRef<'a>, Self::Error> + Send,
-        ) -> Result<Self, Self::Error> {
-            Self::try_build_array(f)
-        }
-    }
-
-    impl<'a> ParArray<IndexVec2D, NodeRef<'a>, TestData<'a>> for Array3x3<NodeRef<'a>> {
-        type Error = ();
-        fn parallel_build_array(
-            _parallel_builder: &TestData<'a>,
-            f: impl Fn(IndexVec2D) -> Result<NodeRef<'a>, Self::Error> + Send,
-        ) -> Result<Self, Self::Error> {
-            Self::try_build_array(f)
-        }
-    }
-
-    impl<'a> ParArray<IndexVec2D, Array2x2<NodeRef<'a>>, TestData<'a>>
-        for Array2x2<Array2x2<NodeRef<'a>>>
-    {
-        type Error = ();
-        fn parallel_build_array(
-            _parallel_builder: &TestData<'a>,
-            f: impl Fn(IndexVec2D) -> Result<Array2x2<NodeRef<'a>>, Self::Error> + Send,
-        ) -> Result<Self, Self::Error> {
-            Self::try_build_array(f)
-        }
-    }
-
-    impl<'a> HashlifeData for TestData<'a> {
-        type NodeId = NodeRef<'a>;
-        type IndexVec = IndexVec2D;
-        type Error = ();
-        type Array2 = Array2x2<NodeRef<'a>>;
-        type Array3 = Array3x3<NodeRef<'a>>;
-        type Array2OfArray2 = Array2x2<Self::Array2>;
-        fn intern_node(
-            &self,
-            key: Self::Array2,
-            level: usize,
-        ) -> Result<Self::NodeId, Self::Error> {
-            assert!(level <= u8::MAX as usize);
-            key.for_each(|v| assert_eq!(v.0.next_level(), level));
-            let mut this = self.borrow_mut();
-            let next_node = Node::Node(NodeData {
-                key,
-                level: level as u8,
-                next: SendWrapper::new(Cell::new(None)),
-                id: this.next_id,
-            });
-            match this.hash_set.get(&next_node) {
-                Some(&node) => Ok(NodeRef(node)),
-                None => {
-                    this.next_id += 1;
-                    let node = this.node_arena.alloc(next_node);
-                    assert!(this.hash_set.insert(node));
-                    Ok(NodeRef(node))
-                }
-            }
-        }
-        fn get_node_key(&self, node: Self::NodeId, level: usize) -> Self::Array2 {
-            match node.0 {
-                Node::Leaf(_) => panic!("leaf node has no key"),
-                Node::Node(node) => {
-                    assert_eq!(level, node.level as usize);
-                    node.key
-                }
-            }
-        }
-        fn get_or_compute_node_next(
-            &self,
-            node: Self::NodeId,
-            level: usize,
-            compute_next_nonleaf: impl FnOnce() -> Result<Self::NodeId, Self::Error>,
-        ) -> Result<Self::NodeId, Self::Error> {
-            if let Node::Node(node) = node.0 {
-                assert_eq!(node.level as usize, level);
-                if let Some(next) = node.next.get() {
-                    return Ok(next);
-                }
-                let next = match level {
-                    0 => unreachable!(),
-                    1 => {
-                        let key = Self::Array2::try_build_array(|index_vec| todo!())?;
-                        todo!()
-                    }
-                    _ => compute_next_nonleaf()?,
-                };
-                assert_eq!(next.0.next_level(), level);
-                let old = node.next.replace(Some(next));
-                if let Some(old) = old {
-                    assert_eq!(old, next);
-                }
-                Ok(next)
-            } else {
-                panic!()
-            }
-        }
-    }
-}
-*/

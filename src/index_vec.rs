@@ -1,12 +1,11 @@
 use crate::arrayvec::ArrayVec;
-use std::{
+use core::{
     fmt,
     hash::{Hash, Hasher},
+    ops::Add,
 };
 
 pub unsafe trait IndexVecExt: From<usize> {
-    fn as_slice(&self) -> &[usize];
-    fn as_mut_slice(&mut self) -> &mut [usize];
     fn try_for_each_index<E, F: FnMut(Self) -> Result<(), E>>(f: F, length: usize)
         -> Result<(), E>;
     fn for_each_index<F: FnMut(Self)>(f: F, length: usize);
@@ -26,12 +25,6 @@ pub unsafe trait IndexVecNonzeroDimension: IndexVecExt {
 }
 
 unsafe impl IndexVecExt for IndexVec<0> {
-    fn as_slice(&self) -> &[usize] {
-        &self.0
-    }
-    fn as_mut_slice(&mut self) -> &mut [usize] {
-        &mut self.0
-    }
     fn try_for_each_index<E, F: FnMut(Self) -> Result<(), E>>(
         mut f: F,
         _length: usize,
@@ -54,12 +47,6 @@ unsafe impl IndexVecExt for IndexVec<0> {
 macro_rules! impl_nonzero_dimension {
     ($Dimension:literal) => {
         unsafe impl IndexVecExt for IndexVec<$Dimension> {
-            fn as_slice(&self) -> &[usize] {
-                &self.0
-            }
-            fn as_mut_slice(&mut self) -> &mut [usize] {
-                &mut self.0
-            }
             fn try_for_each_index<E, F: FnMut(Self) -> Result<(), E>>(
                 mut f: F,
                 length: usize,
@@ -169,6 +156,14 @@ impl<const D: usize> Hash for IndexVec<D> {
     }
 }
 
+impl<const D: usize> PartialEq for IndexVec<D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<const D: usize> Eq for IndexVec<D> {}
+
 impl<const D: usize> IndexVec<D> {
     pub fn try_map<E>(self, mut f: impl FnMut(usize) -> Result<usize, E>) -> Result<Self, E> {
         let mut retval = ArrayVec::<usize, D>::new();
@@ -179,6 +174,16 @@ impl<const D: usize> IndexVec<D> {
     }
     pub fn map(self, mut f: impl FnMut(usize) -> usize) -> Self {
         self.try_map(|v| Ok::<_, ()>(f(v))).unwrap()
+    }
+}
+
+impl<const D: usize> Add for IndexVec<D> {
+    type Output = Self;
+    fn add(mut self, rhs: Self) -> Self::Output {
+        for (l, r) in self.0.iter_mut().zip(&rhs.0) {
+            *l += *r;
+        }
+        self
     }
 }
 

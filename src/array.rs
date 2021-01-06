@@ -1,26 +1,53 @@
 use crate::index_vec::{IndexVec, IndexVecExt, IndexVecNonzeroDimension};
-use mem::MaybeUninit;
-use std::{
-    fmt, mem,
+use core::{
+    fmt,
+    hash::{Hash, Hasher},
+    mem::{self, MaybeUninit},
     ops::{Index, IndexMut},
     ptr,
 };
 
+/// # Safety
+/// `Self::Repr` must be an array of `Self` or just `Self`.
 pub unsafe trait ArrayRepr<const LENGTH: usize, const DIMENSION: usize>: Sized {
     type Repr;
+    /// # Safety
+    /// ptr must point to a valid instance of `Self::Repr`, it doesn't need to point to a mutable value
     unsafe fn index_ptr_checked(ptr: *mut Self::Repr, index: IndexVec<DIMENSION>) -> *mut Self {
         for &i in &index.0 {
             assert!(i < LENGTH);
         }
         Self::index_ptr_unchecked(ptr, index)
     }
+    /// # Safety
+    /// ptr must point to a valid instance of `Self::Repr` and index must be in-bounds, ptr doesn't need to point to a mutable value
     unsafe fn index_ptr_unchecked(ptr: *mut Self::Repr, index: IndexVec<DIMENSION>) -> *mut Self;
+    fn debug_helper<DebugFn: Fn(&Self, &mut fmt::Formatter<'_>) -> fmt::Result>(
+        value: &Self::Repr,
+        debug_fn: &DebugFn,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result;
 }
 
 unsafe impl<T, const LENGTH: usize> ArrayRepr<LENGTH, 0> for T {
     type Repr = T;
     unsafe fn index_ptr_unchecked(ptr: *mut Self::Repr, _index: IndexVec<0>) -> *mut Self {
         ptr
+    }
+    fn debug_helper<DebugFn: Fn(&Self, &mut fmt::Formatter<'_>) -> fmt::Result>(
+        value: &Self::Repr,
+        debug_fn: &DebugFn,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        debug_fn(value, f)
+    }
+}
+
+struct DebugWrapper<T>(T);
+
+impl<T: Fn(&mut fmt::Formatter<'_>) -> fmt::Result> fmt::Debug for DebugWrapper<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (self.0)(f)
     }
 }
 
@@ -38,6 +65,21 @@ macro_rules! impl_nonzero_dimension {
                     index.rest(),
                 )
             }
+            fn debug_helper<DebugFn: Fn(&Self, &mut fmt::Formatter<'_>) -> fmt::Result>(
+                value: &Self::Repr,
+                debug_fn: &DebugFn,
+                f: &mut fmt::Formatter<'_>,
+            ) -> fmt::Result {
+                f.debug_list()
+                    .entries(value.iter().map(|value| {
+                        DebugWrapper(move |f: &mut fmt::Formatter<'_>| {
+                            <T as ArrayRepr<LENGTH, { $DIMENSION - 1 }>>::debug_helper(
+                                value, debug_fn, f,
+                            )
+                        })
+                    }))
+                    .finish()
+            }
         }
     };
 }
@@ -52,7 +94,8 @@ macro_rules! impl_nonzero_dimensions {
 
 impl_nonzero_dimensions!([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 
-pub struct Array<T, const LENGTH: usize, const DIMENSION: usize>(T::Repr)
+#[repr(transparent)]
+pub struct Array<T, const LENGTH: usize, const DIMENSION: usize>(pub T::Repr)
 where
     T: ArrayRepr<LENGTH, DIMENSION>;
 
@@ -61,6 +104,7 @@ where
     T: ArrayRepr<LENGTH, DIMENSION>,
     T: Copy,
     T::Repr: Copy,
+    IndexVec<DIMENSION>: IndexVecExt,
 {
 }
 
@@ -68,13 +112,13 @@ impl<T, const LENGTH: usize, const DIMENSION: usize> Clone for Array<T, LENGTH, 
 where
     T: ArrayRepr<LENGTH, DIMENSION>,
     T: Clone,
-    T::Repr: Clone,
+    IndexVec<DIMENSION>: IndexVecExt,
 {
     fn clone(&self) -> Self {
-        Array(self.0.clone())
+        Array::build_array(|index| self[index].clone())
     }
     fn clone_from(&mut self, source: &Self) {
-        self.0.clone_from(&source.0);
+        IndexVec::for_each_index(|index| self[index].clone_from(&source[index]), LENGTH);
     }
 }
 
@@ -82,10 +126,14 @@ impl<T, const LENGTH: usize, const DIMENSION: usize> fmt::Debug for Array<T, LEN
 where
     T: ArrayRepr<LENGTH, DIMENSION>,
     T: fmt::Debug,
-    T::Repr: fmt::Debug,
+    IndexVec<DIMENSION>: IndexVecExt,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Array").field(&self.0).finish()
+        f.debug_tuple("Array")
+            .field(&DebugWrapper(|f: &mut fmt::Formatter<'_>| {
+                T::debug_helper(&self.0, &|v, f| fmt::Debug::fmt(v, f), f)
+            }))
+            .finish()
     }
 }
 
@@ -93,11 +141,53 @@ impl<T, const LENGTH: usize, const DIMENSION: usize> Default for Array<T, LENGTH
 where
     T: ArrayRepr<LENGTH, DIMENSION>,
     T: Default,
-    T::Repr: Default,
+    IndexVec<DIMENSION>: IndexVecExt,
 {
     fn default() -> Self {
-        Array(T::Repr::default())
+        Array::build_array(|_| T::default())
     }
+}
+
+impl<T, Other, const LENGTH: usize, const DIMENSION: usize>
+    PartialEq<Array<Other, LENGTH, DIMENSION>> for Array<T, LENGTH, DIMENSION>
+where
+    T: ArrayRepr<LENGTH, DIMENSION>,
+    Other: ArrayRepr<LENGTH, DIMENSION>,
+    T: PartialEq<Other>,
+    IndexVec<DIMENSION>: IndexVecExt,
+{
+    fn eq(&self, other: &Array<Other, LENGTH, DIMENSION>) -> bool {
+        IndexVec::try_for_each_index(
+            |index| {
+                if self[index] == other[index] {
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            },
+            LENGTH,
+        )
+        .is_ok()
+    }
+}
+
+impl<T, const LENGTH: usize, const DIMENSION: usize> Hash for Array<T, LENGTH, DIMENSION>
+where
+    T: ArrayRepr<LENGTH, DIMENSION>,
+    T: Hash,
+    IndexVec<DIMENSION>: IndexVecExt,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        IndexVec::for_each_index(|index| self[index].hash(state), LENGTH)
+    }
+}
+
+impl<T, const LENGTH: usize, const DIMENSION: usize> Eq for Array<T, LENGTH, DIMENSION>
+where
+    T: ArrayRepr<LENGTH, DIMENSION>,
+    T: Eq,
+    IndexVec<DIMENSION>: IndexVecExt,
+{
 }
 
 impl<T, const LENGTH: usize, const DIMENSION: usize> Index<IndexVec<DIMENSION>>
@@ -124,6 +214,22 @@ where
     fn index_mut(&mut self, index: IndexVec<DIMENSION>) -> &mut Self::Output {
         unsafe { &mut *<T as ArrayRepr<LENGTH, DIMENSION>>::index_ptr_checked(&mut self.0, index) }
     }
+}
+
+unsafe impl<T: Send, const LENGTH: usize, const DIMENSION: usize> Send
+    for Array<T, LENGTH, DIMENSION>
+where
+    T: ArrayRepr<LENGTH, DIMENSION>,
+{
+    // redundant implementation just to reduce constraints required in generic contexts
+}
+
+unsafe impl<T: Sync, const LENGTH: usize, const DIMENSION: usize> Sync
+    for Array<T, LENGTH, DIMENSION>
+where
+    T: ArrayRepr<LENGTH, DIMENSION>,
+{
+    // redundant implementation just to reduce constraints required in generic contexts
 }
 
 struct CallOnDrop<T: FnMut()>(T);
