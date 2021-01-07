@@ -1,7 +1,7 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt},
-    HasErrorType, HashlifeData,
+    HasErrorType, HashlifeData, NodeAndLevel,
 };
 
 #[path = "hashlife.rs"]
@@ -49,11 +49,10 @@ where
 {
     fn recursive_hashlife_compute_node_next(
         &self,
-        node: Self::NodeId,
-        level: usize,
+        node: NodeAndLevel<Self::NodeId>,
         log2_step_size: usize,
-    ) -> Result<Self::NodeId, Self::Error> {
-        hashlife::recursive_hashlife_compute_node_next(self, node, level, log2_step_size)
+    ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
+        hashlife::recursive_hashlife_compute_node_next(self, node, log2_step_size)
     }
 }
 

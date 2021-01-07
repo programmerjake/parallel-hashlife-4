@@ -1,7 +1,7 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt},
-    HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeOrLeaf,
+    HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
 };
 use alloc::{rc::Rc, vec::Vec};
 use core::{
@@ -207,6 +207,31 @@ where
     }
 }
 
+impl<LeafData, const DIMENSION: usize> Simple<LeafData, DIMENSION>
+where
+    LeafData: LeafStep<DIMENSION>,
+    NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    IndexVec<DIMENSION>: IndexVecExt,
+    Array<NodeId<LeafData::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafData::Leaf: Hash + Eq,
+{
+    fn intern_node_helper(
+        &self,
+        node: Node<LeafData::Leaf, DIMENSION>,
+    ) -> NodeId<LeafData::Leaf, DIMENSION> {
+        let mut nodes = self.nodes.borrow_mut();
+        NodeId(match nodes.raw_entry_mut().from_key(&node) {
+            RawEntryMut::Occupied(entry) => entry.key().clone(),
+            RawEntryMut::Vacant(entry) => {
+                let node = Rc::new(node);
+                entry.insert(node.clone(), ());
+                node
+            }
+        })
+    }
+}
+
 impl<LeafData, const DIMENSION: usize> HashlifeData<DIMENSION> for Simple<LeafData, DIMENSION>
 where
     LeafData: LeafStep<DIMENSION>,
@@ -216,94 +241,102 @@ where
     Array<NodeId<LeafData::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     LeafData::Leaf: Hash + Eq,
 {
-    fn intern_node(
+    fn intern_nonleaf_node(
         &self,
-        key: NodeOrLeaf<Array<Self::NodeId, 2, DIMENSION>, Array<Self::Leaf, 2, DIMENSION>>,
-        level: usize,
-    ) -> Result<Self::NodeId, Self::Error> {
-        let node = match key {
-            NodeOrLeaf::Node(key) => {
-                let level =
-                    NonZeroUsize::new(level).expect("non-leaf node must have non-zero level");
-                IndexVec::for_each_index(
-                    |index| assert_eq!(key[index].level(), level.get() - 1),
-                    2,
-                );
-                NodeOrLeaf::Node(NodeData {
-                    level,
-                    key,
-                    next: RefCell::new(None),
-                })
-            }
-            NodeOrLeaf::Leaf(key) => {
-                assert_eq!(level, 0, "leaf node must have level of 0");
-                NodeOrLeaf::Leaf(key)
-            }
-        };
-        let mut nodes = self.nodes.borrow_mut();
-        Ok(NodeId(match nodes.raw_entry_mut().from_key(&node) {
-            RawEntryMut::Occupied(entry) => entry.key().clone(),
-            RawEntryMut::Vacant(entry) => {
-                let node = Rc::new(node);
-                entry.insert(node.clone(), ());
-                node
-            }
-        }))
+        key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
+    ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
+        let level = NonZeroUsize::new(key.level + 1).unwrap();
+        IndexVec::for_each_index(|index| assert_eq!(key.node[index].level(), key.level), 2);
+        Ok(NodeAndLevel {
+            node: self.intern_node_helper(NodeOrLeaf::Node(NodeData {
+                level,
+                key: key.node,
+                next: RefCell::new(None),
+            })),
+            level: level.get(),
+        })
+    }
+    fn intern_leaf_node(
+        &self,
+        key: Array<Self::Leaf, 2, DIMENSION>,
+    ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
+        Ok(NodeAndLevel {
+            node: self.intern_node_helper(NodeOrLeaf::Leaf(key)),
+            level: 0,
+        })
     }
     fn get_node_key(
         &self,
-        node: Self::NodeId,
-        level: usize,
-    ) -> NodeOrLeaf<Array<Self::NodeId, 2, DIMENSION>, Array<Self::Leaf, 2, DIMENSION>> {
-        assert_eq!(node.level(), level);
-        match &*node.0 {
-            NodeOrLeaf::Node(node) => NodeOrLeaf::Node(node.key.clone()),
+        node: NodeAndLevel<Self::NodeId>,
+    ) -> NodeOrLeaf<NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>, Array<Self::Leaf, 2, DIMENSION>>
+    {
+        assert_eq!(node.node.level(), node.level);
+        match &*node.node.0 {
+            NodeOrLeaf::Node(node_data) => NodeOrLeaf::Node(NodeAndLevel {
+                node: node_data.key.clone(),
+                level: node.level - 1,
+            }),
             NodeOrLeaf::Leaf(key) => NodeOrLeaf::Leaf(key.clone()),
         }
     }
-    fn get_node_next(&self, node: Self::NodeId, level: usize) -> Option<Self::NodeId> {
-        assert_eq!(node.level(), level);
-        match &*node.0 {
+    fn get_nonleaf_node_next(
+        &self,
+        node: NodeAndLevel<Self::NodeId>,
+    ) -> Option<NodeAndLevel<Self::NodeId>> {
+        assert_eq!(node.node.level(), node.level);
+        match &*node.node.0 {
             NodeOrLeaf::Leaf(_) => panic!("leaf nodes don't have a next field"),
-            NodeOrLeaf::Node(node) => node.next.borrow().clone(),
+            NodeOrLeaf::Node(node_data) => {
+                node_data.next.borrow().clone().map(|next| NodeAndLevel {
+                    node: next,
+                    level: node.level - 1,
+                })
+            }
         }
     }
-    fn fill_node_next(&self, node: Self::NodeId, level: usize, new_next: Self::NodeId) {
-        assert_eq!(node.level(), level);
-        match &*node.0 {
+    fn fill_nonleaf_node_next(
+        &self,
+        node: NodeAndLevel<Self::NodeId>,
+        new_next: NodeAndLevel<Self::NodeId>,
+    ) {
+        assert_eq!(node.node.level(), node.level);
+        assert_eq!(new_next.node.level(), new_next.level);
+        match &*node.node.0 {
             NodeOrLeaf::Leaf(_) => panic!("leaf nodes don't have a next field"),
-            NodeOrLeaf::Node(node) => {
-                assert_eq!(node.level.get() - 1, new_next.level());
-                let mut next = node.next.borrow_mut();
+            NodeOrLeaf::Node(node_data) => {
+                assert_eq!(node.level - 1, new_next.level);
+                let mut next = node_data.next.borrow_mut();
                 if let Some(next) = &*next {
-                    assert_eq!(*next, new_next);
+                    assert_eq!(*next, new_next.node);
                 } else {
-                    *next = Some(new_next);
+                    *next = Some(new_next.node);
                 }
             }
         }
     }
-    fn get_empty_node(&self, level: usize) -> Result<Self::NodeId, Self::Error> {
+    fn get_empty_node(&self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         let mut empty_nodes = self.empty_nodes.borrow_mut();
-        if let Some(node) = empty_nodes.get(level) {
-            return Ok(node.clone());
+        if let Some(node) = empty_nodes.get(level).cloned() {
+            return Ok(NodeAndLevel { node, level });
         }
         let additional = level - empty_nodes.len() + 1;
         empty_nodes.reserve(additional);
         mem::drop(empty_nodes);
         loop {
             let empty_nodes = self.empty_nodes.borrow();
-            if let Some(node) = empty_nodes.get(level) {
-                return Ok(node.clone());
+            if let Some(node) = empty_nodes.get(level).cloned() {
+                return Ok(NodeAndLevel { node, level });
             }
-            let key = if let Some(node) = empty_nodes.last() {
-                NodeOrLeaf::Node(Array::build_array(|_| node.clone()))
-            } else {
-                NodeOrLeaf::Leaf(Array::default())
-            };
             let level = empty_nodes.len();
-            let node = self.intern_node(key, level)?;
-            mem::drop(empty_nodes);
+            let node = if let Some(node) = { empty_nodes }.last().cloned() {
+                self.intern_nonleaf_node(NodeAndLevel {
+                    node: Array::build_array(|_| node.clone()),
+                    level: level - 1,
+                })?
+                .node
+            } else {
+                self.intern_leaf_node(Array::default())?.node
+            };
             self.empty_nodes.borrow_mut().push(node);
         }
     }
@@ -312,8 +345,10 @@ where
 #[cfg(test)]
 mod test {
     use crate::{
-        array::Array, index_vec::IndexVec, serial::Hashlife, HasErrorType, HasLeafType,
-        HashlifeData, LeafStep, NodeOrLeaf,
+        array::Array,
+        index_vec::{IndexVec, IndexVecExt},
+        serial::Hashlife,
+        HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
     };
 
     use super::Simple;
@@ -327,7 +362,7 @@ mod test {
     }
 
     impl HasLeafType<DIMENSION> for LeafData {
-        type Leaf = usize;
+        type Leaf = u8;
     }
 
     impl LeafStep<DIMENSION> for LeafData {
@@ -335,51 +370,213 @@ mod test {
             &self,
             neighborhood: crate::array::Array<Self::Leaf, 3, DIMENSION>,
         ) -> Result<Self::Leaf, Self::Error> {
-            Ok(match neighborhood[IndexVec([1, 1])] {
-                0 => neighborhood[IndexVec([0, 1])],
-                v => match neighborhood[IndexVec([1, 2])] {
-                    0 => v + 1,
-                    v2 => v + v2 + 2,
-                },
+            let mut sum = 0;
+            IndexVec::<DIMENSION>::for_each_index(|index| sum += neighborhood[index], 3);
+            Ok(match sum {
+                3 => 1,
+                4 if neighborhood[IndexVec([1, 1])] != 0 => 1,
+                _ => 0,
             })
         }
     }
 
+    type NodeId = <Simple<LeafData, DIMENSION> as HasNodeType<DIMENSION>>::NodeId;
+
+    fn get_leaf(
+        hl: &Simple<LeafData, DIMENSION>,
+        mut node: NodeAndLevel<NodeId>,
+        mut location: IndexVec<DIMENSION>,
+    ) -> u8 {
+        loop {
+            match hl.get_node_key(node) {
+                NodeOrLeaf::Node(key) => {
+                    let shift = key.level + 1;
+                    node = key.map_node(|key| key[location.map(|v| v >> shift)].clone());
+                    location = location.map(|v| v & ((1 << shift) - 1));
+                }
+                NodeOrLeaf::Leaf(key) => break key[location],
+            }
+        }
+    }
+
+    fn dump_2d(hl: &Simple<LeafData, DIMENSION>, node: NodeAndLevel<NodeId>, title: &str) {
+        println!("{}:", title);
+        let size = 2usize << node.level;
+        for y in 0..size {
+            for x in 0..size {
+                match get_leaf(hl, node.clone(), IndexVec([y, x])) {
+                    0 => print!("_ "),
+                    leaf => print!("{} ", leaf),
+                }
+            }
+            println!();
+        }
+    }
+
+    fn build_2d_with_helper(
+        hl: &Simple<LeafData, DIMENSION>,
+        f: &mut impl FnMut(IndexVec<DIMENSION>) -> u8,
+        outer_location: IndexVec<DIMENSION>,
+        level: usize,
+    ) -> NodeAndLevel<NodeId> {
+        if level == 0 {
+            hl.intern_leaf_node(Array::build_array(|index| {
+                f(index + outer_location.map(|v| v * 2))
+            }))
+            .unwrap()
+        } else {
+            let key = Array::build_array(|index| {
+                build_2d_with_helper(hl, f, index + outer_location.map(|v| v * 2), level - 1).node
+            });
+            hl.intern_nonleaf_node(NodeAndLevel {
+                node: key,
+                level: level - 1,
+            })
+            .unwrap()
+        }
+    }
+
+    fn build_2d_with(
+        hl: &Simple<LeafData, DIMENSION>,
+        mut f: impl FnMut(IndexVec<DIMENSION>) -> u8,
+        level: usize,
+    ) -> NodeAndLevel<NodeId> {
+        build_2d_with_helper(hl, &mut f, 0usize.into(), level)
+    }
+
+    fn build_2d<const SIZE: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
+        array: [[u8; SIZE]; SIZE],
+    ) -> NodeAndLevel<NodeId> {
+        assert!(SIZE.is_power_of_two());
+        assert_ne!(SIZE, 1);
+        let log2_size = SIZE.trailing_zeros();
+        let level = log2_size as usize - 1;
+        let array = Array(array);
+        build_2d_with(hl, |index| array[index], level)
+    }
+
     #[test]
     fn test1() {
-        let simple = Simple::new(LeafData);
-        let empty0 = simple
-            .intern_node(NodeOrLeaf::Leaf(Array([[0, 0], [0, 0]])), 0)
-            .unwrap();
+        let hl = Simple::new(LeafData);
+        let empty0 = build_2d(&hl, [[0, 0], [0, 0]]);
+        dump_2d(&hl, empty0.clone(), "empty0");
         assert_eq!(
-            simple
-                .intern_node(NodeOrLeaf::Leaf(Array([[0, 0], [0, 0]])), 0)
-                .unwrap(),
+            hl.intern_leaf_node(Array([[0, 0], [0, 0]])).unwrap(),
             empty0
         );
-        assert_eq!(simple.get_empty_node(0).unwrap(), empty0);
-        let node0 = simple
-            .intern_node(NodeOrLeaf::Leaf(Array([[1, 0], [0, 0]])), 0)
+        assert_eq!(hl.get_empty_node(0).unwrap(), empty0);
+        let node0 = build_2d(&hl, [[1, 1], [1, 1]]);
+        dump_2d(&hl, node0.clone(), "node0");
+        let node1 = hl
+            .intern_nonleaf_node(NodeAndLevel {
+                node: Array([
+                    [empty0.node.clone(), empty0.node.clone()],
+                    [empty0.node.clone(), node0.node.clone()],
+                ]),
+                level: 0,
+            })
             .unwrap();
-        let node1 = simple
-            .intern_node(
-                NodeOrLeaf::Node(Array([
-                    [empty0.clone(), empty0.clone()],
-                    [empty0.clone(), node0.clone()],
-                ])),
-                1,
-            )
-            .unwrap();
-        let node2 = simple
-            .intern_node(NodeOrLeaf::Leaf(Array([[0, 0], [0, 1]])), 0)
-            .unwrap();
-        assert_eq!(simple.expand_root(node2, 0).unwrap(), node1);
-        let node1_next = simple
-            .recursive_hashlife_compute_node_next(node1, 1, 0)
-            .unwrap();
+        dump_2d(&hl, node1.clone(), "node1");
         assert_eq!(
-            simple.get_node_key(node1_next.clone(), 0),
-            NodeOrLeaf::Leaf(Array([[0, 0], [0, 2]]))
+            node1,
+            build_2d(
+                &hl,
+                [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 1], [0, 0, 1, 1]]
+            )
         );
+        let node1_next = hl.recursive_hashlife_compute_node_next(node1, 0).unwrap();
+        dump_2d(&hl, node1_next.clone(), "node1_next");
+        assert_eq!(
+            hl.get_node_key(node1_next.clone()),
+            NodeOrLeaf::Leaf(Array([[0, 0], [0, 1]]))
+        );
+    }
+
+    fn make_step0(hl: &Simple<LeafData, DIMENSION>) -> NodeAndLevel<NodeId> {
+        build_2d(
+            hl,
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ],
+        )
+    }
+
+    fn make_step80(hl: &Simple<LeafData, DIMENSION>) -> NodeAndLevel<NodeId> {
+        build_2d(
+            hl,
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ],
+        )
+    }
+
+    fn test_with_step_size(log2_step_size: usize) {
+        let hl = Simple::new(LeafData);
+        let mut root = make_step0(&hl);
+        dump_2d(&hl, root.clone(), "root");
+        let mut step = 0u128;
+        while step < 80 {
+            root = hl.expand_root(root).unwrap();
+            root = hl
+                .recursive_hashlife_compute_node_next(root, log2_step_size)
+                .unwrap();
+            step += 1 << log2_step_size;
+            dbg!(step);
+            dump_2d(&hl, root.clone(), "root");
+        }
+        let expected = make_step80(&hl);
+        dump_2d(&hl, expected.clone(), "expected");
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn test_step_8() {
+        test_with_step_size(3);
+    }
+
+    #[test]
+    fn test_step_4() {
+        test_with_step_size(2);
+    }
+
+    #[test]
+    fn test_step_2() {
+        test_with_step_size(1);
+    }
+
+    #[test]
+    fn test_step_1() {
+        test_with_step_size(0);
     }
 }
