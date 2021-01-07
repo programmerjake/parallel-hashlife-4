@@ -9,6 +9,7 @@ pub mod array;
 mod arrayvec;
 pub mod index_vec;
 pub mod parallel;
+pub mod parallel_hashtable;
 pub mod serial;
 pub mod simple;
 
