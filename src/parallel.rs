@@ -5,8 +5,8 @@ use crate::{
 };
 use core::marker::{Send as TheSend, Sync as TheSync};
 
-#[path = "hashlife.rs"]
-mod hashlife;
+#[path = "hashlife_impl.rs"]
+mod hashlife_impl;
 
 pub trait ParallelBuildArray<T, const LENGTH: usize, const DIMENSION: usize>: HasErrorType
 where
@@ -36,11 +36,7 @@ where
     }
 }
 
-/// # Safety
-/// Implementation must not run code that would cross threads other than
-/// through calling `self.parallel_build_array()`, since this implementation
-/// is also used for the single-threaded version.
-pub unsafe trait Hashlife<const DIMENSION: usize>: HashlifeData<DIMENSION> + Sync
+pub trait Hashlife<const DIMENSION: usize>: HashlifeData<DIMENSION> + Sync
 where
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -56,11 +52,11 @@ where
         node: NodeAndLevel<Self::NodeId>,
         log2_step_size: usize,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
-        hashlife::recursive_hashlife_compute_node_next(self, node, log2_step_size)
+        hashlife_impl::recursive_hashlife_compute_node_next(self, node, log2_step_size)
     }
 }
 
-unsafe impl<T: ?Sized, const DIMENSION: usize> Hashlife<DIMENSION> for T
+impl<T: ?Sized, const DIMENSION: usize> Hashlife<DIMENSION> for T
 where
     Self: HashlifeData<DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,

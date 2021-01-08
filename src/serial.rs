@@ -4,8 +4,8 @@ use crate::{
     HasErrorType, HashlifeData, NodeAndLevel,
 };
 
-#[path = "hashlife.rs"]
-mod hashlife;
+#[path = "hashlife_impl.rs"]
+mod hashlife_impl;
 
 mod send_sync {
     pub trait Everything {}
@@ -52,7 +52,7 @@ where
         node: NodeAndLevel<Self::NodeId>,
         log2_step_size: usize,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
-        hashlife::recursive_hashlife_compute_node_next(self, node, log2_step_size)
+        hashlife_impl::recursive_hashlife_compute_node_next(self, node, log2_step_size)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::index_vec::{IndexVec, IndexVecExt, IndexVecNonzeroDimension};
+use crate::index_vec::{IndexVec, IndexVecExt, IndexVecForEach, IndexVecNonzeroDimension};
 use core::{
     fmt,
     hash::{Hash, Hasher},
@@ -118,7 +118,7 @@ where
         Array::build_array(|index| self[index].clone())
     }
     fn clone_from(&mut self, source: &Self) {
-        IndexVec::for_each_index(|index| self[index].clone_from(&source[index]), LENGTH);
+        IndexVec::for_each_index(|index| self[index].clone_from(&source[index]), LENGTH, ..);
     }
 }
 
@@ -166,6 +166,7 @@ where
                 }
             },
             LENGTH,
+            ..,
         )
         .is_ok()
     }
@@ -178,7 +179,7 @@ where
     IndexVec<DIMENSION>: IndexVecExt,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        IndexVec::for_each_index(|index| self[index].hash(state), LENGTH)
+        IndexVec::for_each_index(|index| self[index].hash(state), LENGTH, ..)
     }
 }
 
@@ -264,10 +265,10 @@ where
             IndexVec::<DIMENSION>::try_for_each_index(
                 |index| -> Result<(), E> {
                     let handle_failure = CallOnDrop(|| {
-                        IndexVec::<DIMENSION>::for_each_index_before(
+                        IndexVec::<DIMENSION>::for_each_index(
                             |index| ptr::drop_in_place(T::index_ptr_unchecked(array_ptr, index)),
                             LENGTH,
-                            index,
+                            ..index,
                         )
                     });
                     let value = f(index)?;
@@ -276,6 +277,7 @@ where
                     Ok(())
                 },
                 LENGTH,
+                ..,
             )?;
             Ok(Self(array.assume_init()))
         }

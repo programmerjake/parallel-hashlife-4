@@ -1,6 +1,6 @@
 use crate::{
     array::{Array, ArrayRepr},
-    index_vec::{IndexVec, IndexVecExt},
+    index_vec::{IndexVec, IndexVecExt, IndexVecForEach},
     HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
 };
 use alloc::{rc::Rc, vec::Vec};
@@ -241,12 +241,16 @@ where
     Array<NodeId<LeafData::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     LeafData::Leaf: Hash + Eq,
 {
-    fn intern_nonleaf_node(
+    fn intern_non_leaf_node(
         &self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         let level = NonZeroUsize::new(key.level + 1).unwrap();
-        IndexVec::for_each_index(|index| assert_eq!(key.node[index].level(), key.level), 2);
+        IndexVec::<DIMENSION>::for_each_index(
+            |index| assert_eq!(key.node[index].level(), key.level),
+            2,
+            ..,
+        );
         Ok(NodeAndLevel {
             node: self.intern_node_helper(NodeOrLeaf::Node(NodeData {
                 level,
@@ -279,7 +283,7 @@ where
             NodeOrLeaf::Leaf(key) => NodeOrLeaf::Leaf(key.clone()),
         }
     }
-    fn get_nonleaf_node_next(
+    fn get_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Option<NodeAndLevel<Self::NodeId>> {
@@ -294,7 +298,7 @@ where
             }
         }
     }
-    fn fill_nonleaf_node_next(
+    fn fill_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
         new_next: NodeAndLevel<Self::NodeId>,
@@ -329,7 +333,7 @@ where
             }
             let level = empty_nodes.len();
             let node = if let Some(node) = { empty_nodes }.last().cloned() {
-                self.intern_nonleaf_node(NodeAndLevel {
+                self.intern_non_leaf_node(NodeAndLevel {
                     node: Array::build_array(|_| node.clone()),
                     level: level - 1,
                 })?
@@ -344,14 +348,14 @@ where
 
 #[cfg(test)]
 mod test {
+    use super::Simple;
     use crate::{
         array::Array,
-        index_vec::{IndexVec, IndexVecExt},
+        index_vec::{IndexVec, IndexVecForEach},
         serial::Hashlife,
         HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
     };
-
-    use super::Simple;
+    use std::{dbg, print, println};
 
     const DIMENSION: usize = 2;
 
@@ -371,7 +375,7 @@ mod test {
             neighborhood: crate::array::Array<Self::Leaf, 3, DIMENSION>,
         ) -> Result<Self::Leaf, Self::Error> {
             let mut sum = 0;
-            IndexVec::<DIMENSION>::for_each_index(|index| sum += neighborhood[index], 3);
+            IndexVec::<DIMENSION>::for_each_index(|index| sum += neighborhood[index], 3, ..);
             Ok(match sum {
                 3 => 1,
                 4 if neighborhood[IndexVec([1, 1])] != 0 => 1,
@@ -428,7 +432,7 @@ mod test {
             let key = Array::build_array(|index| {
                 build_2d_with_helper(hl, f, index + outer_location.map(|v| v * 2), level - 1).node
             });
-            hl.intern_nonleaf_node(NodeAndLevel {
+            hl.intern_non_leaf_node(NodeAndLevel {
                 node: key,
                 level: level - 1,
             })
@@ -469,7 +473,7 @@ mod test {
         let node0 = build_2d(&hl, [[1, 1], [1, 1]]);
         dump_2d(&hl, node0.clone(), "node0");
         let node1 = hl
-            .intern_nonleaf_node(NodeAndLevel {
+            .intern_non_leaf_node(NodeAndLevel {
                 node: Array([
                     [empty0.node.clone(), empty0.node.clone()],
                     [empty0.node.clone(), node0.node.clone()],

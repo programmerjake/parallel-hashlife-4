@@ -2,13 +2,11 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
     cell::UnsafeCell,
     fmt,
-    hash::BuildHasher,
     hint::spin_loop,
     iter,
     iter::FusedIterator,
-    marker::PhantomData,
     mem,
-    mem::{ManuallyDrop, MaybeUninit},
+    mem::MaybeUninit,
     num::NonZeroUsize,
     slice,
     sync::atomic::{AtomicU32, Ordering},
@@ -138,14 +136,60 @@ impl AtomicState {
         }
     }
     unsafe fn write_start<W: WaitWake>(&self, wait_waker: &W) -> Result<(), State> {
-        todo!()
+        let mut spin_count = 0;
+        let mut state = self.load(Ordering::Acquire);
+        loop {
+            if state.is_full() {
+                return Err(state);
+            }
+            if !state.is_empty() && spin_count < 32 {
+                spin_count += 1;
+                state = self.load(Ordering::Acquire);
+                spin_loop();
+                continue;
+            }
+            if let Err(v) = self.compare_exchange_weak(
+                state,
+                if state.is_empty() {
+                    State::LOCKED
+                } else {
+                    State::LOCKED_WAITERS
+                },
+                Ordering::Acquire,
+                Ordering::Acquire,
+            ) {
+                state = v;
+                spin_loop();
+                continue;
+            }
+            if state.is_empty() {
+                return Ok(());
+            }
+            wait_waker.wait(
+                NonZeroUsize::new_unchecked(self as *const _ as usize),
+                || self.load(Ordering::Acquire) != State::LOCKED_WAITERS,
+            );
+        }
     }
-    unsafe fn write_stop<W: WaitWake>(&self, wait_waker: &W, hash: Option<u64>) {
-        todo!()
+    unsafe fn write_cancel<W: WaitWake>(&self, wait_waker: &W) {
+        let state = self.swap(State::EMPTY, Ordering::Release);
+        if state == State::LOCKED_WAITERS {
+            wait_waker.wake_all(NonZeroUsize::new_unchecked(self as *const _ as usize));
+        } else {
+            debug_assert_eq!(state, State::LOCKED);
+        }
+    }
+    unsafe fn write_finish<W: WaitWake>(&self, wait_waker: &W, hash: u64) {
+        let state = self.swap(State::make_full(hash), Ordering::Release);
+        if state == State::LOCKED_WAITERS {
+            wait_waker.wake_all(NonZeroUsize::new_unchecked(self as *const _ as usize));
+        } else {
+            debug_assert_eq!(state, State::LOCKED);
+        }
     }
 }
 
-pub struct ParallelHashtable<T, W> {
+pub struct ParallelHashTable<T, W> {
     // states and values are always the same length, which is a power of 2
     states: Box<[AtomicState]>,
     values: Box<[UnsafeCell<MaybeUninit<T>>]>,
@@ -153,10 +197,10 @@ pub struct ParallelHashtable<T, W> {
     probe_distance: usize,
 }
 
-unsafe impl<T: Sync + Send, W: Sync + Send> Sync for ParallelHashtable<T, W> {}
-unsafe impl<T: Sync + Send, W: Sync + Send> Send for ParallelHashtable<T, W> {}
+unsafe impl<T: Sync + Send, W: Sync + Send> Sync for ParallelHashTable<T, W> {}
+unsafe impl<T: Sync + Send, W: Sync + Send> Send for ParallelHashTable<T, W> {}
 
-impl<T, W> ParallelHashtable<T, W> {
+impl<T, W> ParallelHashTable<T, W> {
     pub fn new(log2_capacity: u32, wait_waker: W) -> Self {
         let capacity = 1isize
             .checked_shl(log2_capacity)
@@ -190,7 +234,7 @@ impl<T, W> ParallelHashtable<T, W> {
     }
 }
 
-impl<T: fmt::Debug, W> fmt::Debug for ParallelHashtable<T, W> {
+impl<T: fmt::Debug, W> fmt::Debug for ParallelHashTable<T, W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(self.iter()).finish()
     }
@@ -201,7 +245,7 @@ pub struct NotEnoughSpace;
 
 impl fmt::Display for NotEnoughSpace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "not enough space left in hashtable")
+        write!(f, "not enough space left in hash_table")
     }
 }
 
@@ -221,7 +265,7 @@ impl<'a, T, W: WaitWake> LockedEntry<'a, T, W> {
         mem::forget(self);
         unsafe {
             value_cell.get().write(MaybeUninit::new(value));
-            state.write_stop(wait_waker, Some(hash));
+            state.write_finish(wait_waker, hash);
             &*(value_cell.get() as *const T)
         }
     }
@@ -229,7 +273,7 @@ impl<'a, T, W: WaitWake> LockedEntry<'a, T, W> {
 
 impl<T, W: WaitWake> Drop for LockedEntry<'_, T, W> {
     fn drop(&mut self) {
-        unsafe { self.state.write_stop(self.wait_waker, None) }
+        unsafe { self.state.write_cancel(self.wait_waker) }
     }
 }
 
@@ -254,7 +298,7 @@ impl<'a, T> Iterator for ProbeSequence<'a, T> {
     }
 }
 
-impl<T, W> ParallelHashtable<T, W> {
+impl<T, W> ParallelHashTable<T, W> {
     fn probe_sequence(&self, hash: u64) -> iter::Take<ProbeSequence<T>> {
         debug_assert!(self.capacity().is_power_of_two());
         let mask = self.capacity() - 1;
@@ -268,7 +312,7 @@ impl<T, W> ParallelHashtable<T, W> {
     }
 }
 
-impl<T, W: WaitWake> ParallelHashtable<T, W> {
+impl<T, W: WaitWake> ParallelHashTable<T, W> {
     pub fn find<F: FnMut(&T) -> bool>(&self, hash: u64, mut entry_eq: F) -> Option<&T> {
         let expected = State::make_full(hash);
         for (state, value) in self.probe_sequence(hash) {
@@ -358,7 +402,7 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
     }
 }
 
-impl<T, H> IntoIterator for ParallelHashtable<T, H> {
+impl<T, H> IntoIterator for ParallelHashTable<T, H> {
     type Item = T;
     type IntoIter = IntoIter<T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -409,7 +453,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T, H> IntoIterator for &'a ParallelHashtable<T, H> {
+impl<'a, T, H> IntoIterator for &'a ParallelHashTable<T, H> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {

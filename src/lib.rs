@@ -1,17 +1,21 @@
-#![cfg_attr(not(test), no_std)]
+#![no_std]
 use array::{Array, ArrayRepr};
 use core::{fmt::Debug, hash::Hash};
 use index_vec::{IndexVec, IndexVecExt};
 
 extern crate alloc;
+#[cfg(any(test, feature = "std"))]
+extern crate std;
 
 pub mod array;
-mod arrayvec;
+mod array_vec;
 pub mod index_vec;
 pub mod parallel;
-pub mod parallel_hashtable;
+pub mod parallel_hash_table;
 pub mod serial;
 pub mod simple;
+#[cfg(any(test, feature = "std"))]
+pub mod std_support;
 
 pub trait HasErrorType {
     type Error;
@@ -168,7 +172,7 @@ where
     Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     /// key.level is the level of the nodes in key
-    fn intern_nonleaf_node(
+    fn intern_non_leaf_node(
         &self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error>;
@@ -181,11 +185,11 @@ where
         &self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> NodeOrLeaf<NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>, Array<Self::Leaf, 2, DIMENSION>>;
-    fn get_nonleaf_node_next(
+    fn get_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Option<NodeAndLevel<Self::NodeId>>;
-    fn fill_nonleaf_node_next(
+    fn fill_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
         new_next: NodeAndLevel<Self::NodeId>,
@@ -213,7 +217,7 @@ where
                     .node[index.map(|v| 1 - v)]
                 .clone()
             });
-            self.intern_nonleaf_node(NodeAndLevel {
+            self.intern_non_leaf_node(NodeAndLevel {
                 node: key,
                 level: node_key.level - 1,
             })
@@ -237,7 +241,7 @@ where
                         });
                         Ok(self.intern_leaf_node(key)?.node)
                     })?;
-                self.intern_nonleaf_node(NodeAndLevel {
+                self.intern_non_leaf_node(NodeAndLevel {
                     node: final_key,
                     level: 0,
                 })
@@ -254,13 +258,13 @@ where
                             }
                         });
                         Ok(self
-                            .intern_nonleaf_node(NodeAndLevel {
+                            .intern_non_leaf_node(NodeAndLevel {
                                 node: key,
                                 level: node_key.level,
                             })?
                             .node)
                     })?;
-                self.intern_nonleaf_node(NodeAndLevel {
+                self.intern_non_leaf_node(NodeAndLevel {
                     node: final_key,
                     level,
                 })
@@ -276,11 +280,11 @@ where
     Array<T::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<T::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
-    fn intern_nonleaf_node(
+    fn intern_non_leaf_node(
         &self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
-        (**self).intern_nonleaf_node(key)
+        (**self).intern_non_leaf_node(key)
     }
     fn intern_leaf_node(
         &self,
@@ -295,18 +299,18 @@ where
     {
         (**self).get_node_key(node)
     }
-    fn get_nonleaf_node_next(
+    fn get_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Option<NodeAndLevel<Self::NodeId>> {
-        (**self).get_nonleaf_node_next(node)
+        (**self).get_non_leaf_node_next(node)
     }
-    fn fill_nonleaf_node_next(
+    fn fill_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
         new_next: NodeAndLevel<Self::NodeId>,
     ) {
-        (**self).fill_nonleaf_node_next(node, new_next)
+        (**self).fill_non_leaf_node_next(node, new_next)
     }
     fn get_empty_node(&self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         (**self).get_empty_node(level)

@@ -23,7 +23,7 @@ where
         node.level > log2_step_size,
         "level too small to step with requested step size"
     );
-    if let Some(next) = hl.get_nonleaf_node_next(node.clone()) {
+    if let Some(next) = hl.get_non_leaf_node_next(node.clone()) {
         return Ok(next);
     }
     let next = match node.level {
@@ -65,7 +65,7 @@ where
                         let sum_mod2 = sum_vec.map(|v| v % 2);
                         node_key_keys[sum_div2][sum_mod2].clone()
                     });
-                    let temp = hl.intern_nonleaf_node(NodeAndLevel {
+                    let temp = hl.intern_non_leaf_node(NodeAndLevel {
                         node: key,
                         level: node.level - 2,
                     })?;
@@ -79,7 +79,7 @@ where
                 |outer_index| -> Result<HL::NodeId, HL::Error> {
                     let key =
                         Array::build_array(|inner_index| step1[outer_index + inner_index].clone());
-                    let temp = hl.intern_nonleaf_node(NodeAndLevel {
+                    let temp = hl.intern_non_leaf_node(NodeAndLevel {
                         node: key,
                         level: node.level - 2,
                     })?;
@@ -88,7 +88,7 @@ where
                         .node)
                 },
             )?;
-            hl.intern_nonleaf_node(NodeAndLevel {
+            hl.intern_non_leaf_node(NodeAndLevel {
                 node: final_key,
                 level: node.level - 2,
             })?
@@ -111,7 +111,7 @@ where
                         let sum_mod2 = sum_vec.map(|v| v % 2);
                         node_key_keys[sum_div2][sum_mod2].clone()
                     });
-                    let temp = hl.intern_nonleaf_node(NodeAndLevel {
+                    let temp = hl.intern_non_leaf_node(NodeAndLevel {
                         node: key,
                         level: node.level - 2,
                     })?;
@@ -124,18 +124,18 @@ where
                 Array::try_build_array(|outer_index| -> Result<HL::NodeId, HL::Error> {
                     let key =
                         Array::build_array(|inner_index| step1[outer_index + inner_index].clone());
-                    let temp = hl.intern_nonleaf_node(NodeAndLevel {
+                    let temp = hl.intern_non_leaf_node(NodeAndLevel {
                         node: key,
                         level: node.level - 2,
                     })?;
                     Ok(hl.get_center(temp)?.node)
                 })?;
-            hl.intern_nonleaf_node(NodeAndLevel {
+            hl.intern_non_leaf_node(NodeAndLevel {
                 node: final_key,
                 level: node.level - 2,
             })?
         }
     };
-    hl.fill_nonleaf_node_next(node, next.clone());
+    hl.fill_non_leaf_node_next(node, next.clone());
     Ok(next)
 }

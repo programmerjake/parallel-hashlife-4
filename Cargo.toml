@@ -5,7 +5,13 @@ authors = ["Jacob Lifshay <programmerjake@gmail.com>"]
 edition = "2018"
 license = "LGPL-2.1-or-later"
 repository = "https://github.com/programmerjake/parallel-hashlife-4"
-description = "Parallel/Multithreaded 1D/2D/3D Hashlife algorithm"
+description = "Parallel/Multithreaded 1D/2D/3D/4D/... Hashlife algorithm"
+
+[features]
+std = ["rayon"]
+default = ["std"]
 
 [dependencies]
 hashbrown = "0.9.1"
+ahash = ">=0.4.4,<0.7"
+rayon = { optional = true, version = "1.5.0" }
