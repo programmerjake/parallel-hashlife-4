@@ -2,7 +2,7 @@ use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt, IndexVecNonzeroDimension, Indexes},
     parallel::ParallelBuildArray,
-    parallel_hash_table::WaitWake,
+    parallel_hash_table::{self, ParallelHashTable, WaitWake},
     HasErrorType,
 };
 use ahash::RandomState;
@@ -14,8 +14,9 @@ use core::{
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
-use plumbing::{bridge_producer_consumer, Producer};
-use rayon::iter::{plumbing, IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::iter::{
+    plumbing, plumbing::Producer, IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
+};
 use std::{
     boxed::Box,
     sync::{Condvar, Mutex},
@@ -133,7 +134,7 @@ where
     where
         C: plumbing::UnindexedConsumer<Self::Item>,
     {
-        bridge_producer_consumer(self.len(), self, consumer)
+        plumbing::bridge_producer_consumer(self.len(), self, consumer)
     }
     fn opt_len(&self) -> Option<usize> {
         Some(self.len())
@@ -149,7 +150,7 @@ where
         self.0.len()
     }
     fn drive<C: plumbing::Consumer<Self::Item>>(self, consumer: C) -> C::Result {
-        bridge_producer_consumer(self.len(), self, consumer)
+        plumbing::bridge_producer_consumer(self.len(), self, consumer)
     }
     fn with_producer<CB: plumbing::ProducerCallback<Self::Item>>(self, callback: CB) -> CB::Output {
         callback.callback(self)
@@ -219,5 +220,95 @@ where
                 Ok(())
             })?;
         Ok(Array::build_array(|index| retval[index].take().unwrap()))
+    }
+}
+
+pub struct ParallelHashTableParIter<'a, T>(pub parallel_hash_table::Iter<'a, T>);
+
+impl<'a, T> Clone for ParallelHashTableParIter<'a, T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<'a, T: Send + Sync> ParallelIterator for ParallelHashTableParIter<'a, T> {
+    type Item = &'a T;
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
+        C: plumbing::UnindexedConsumer<Self::Item>,
+    {
+        plumbing::bridge_unindexed(self, consumer)
+    }
+}
+
+impl<'a, T: Send + Sync> plumbing::UnindexedProducer for ParallelHashTableParIter<'a, T> {
+    type Item = &'a T;
+    fn split(self) -> (Self, Option<Self>) {
+        let (first_half, last_half) = self.0.split();
+        (Self(first_half), last_half.map(Self))
+    }
+    fn fold_with<F>(self, folder: F) -> F
+    where
+        F: plumbing::Folder<Self::Item>,
+    {
+        folder.consume_iter(self.0)
+    }
+}
+
+impl<'a, T: Send + Sync, W> IntoParallelIterator for &'a ParallelHashTable<T, W> {
+    type Iter = ParallelHashTableParIter<'a, T>;
+    type Item = &'a T;
+    fn into_par_iter(self) -> Self::Iter {
+        ParallelHashTableParIter(self.iter())
+    }
+}
+
+impl<'a, T: Send + Sync> IntoParallelIterator for parallel_hash_table::Iter<'a, T> {
+    type Iter = ParallelHashTableParIter<'a, T>;
+    type Item = &'a T;
+    fn into_par_iter(self) -> Self::Iter {
+        ParallelHashTableParIter(self)
+    }
+}
+
+pub struct ParallelHashTableParIterMut<'a, T>(pub parallel_hash_table::IterMut<'a, T>);
+
+impl<'a, T: Send + Sync> ParallelIterator for ParallelHashTableParIterMut<'a, T> {
+    type Item = parallel_hash_table::EntryMut<'a, T>;
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
+        C: plumbing::UnindexedConsumer<Self::Item>,
+    {
+        plumbing::bridge_unindexed(self, consumer)
+    }
+}
+
+impl<'a, T: Send + Sync> plumbing::UnindexedProducer for ParallelHashTableParIterMut<'a, T> {
+    type Item = parallel_hash_table::EntryMut<'a, T>;
+    fn split(self) -> (Self, Option<Self>) {
+        let (first_half, last_half) = self.0.split();
+        (Self(first_half), last_half.map(Self))
+    }
+    fn fold_with<F>(self, folder: F) -> F
+    where
+        F: plumbing::Folder<Self::Item>,
+    {
+        folder.consume_iter(self.0)
+    }
+}
+
+impl<'a, T: Send + Sync, W> IntoParallelIterator for &'a mut ParallelHashTable<T, W> {
+    type Iter = ParallelHashTableParIterMut<'a, T>;
+    type Item = parallel_hash_table::EntryMut<'a, T>;
+    fn into_par_iter(self) -> Self::Iter {
+        ParallelHashTableParIterMut(self.iter_mut())
+    }
+}
+
+impl<'a, T: Send + Sync> IntoParallelIterator for parallel_hash_table::IterMut<'a, T> {
+    type Iter = ParallelHashTableParIterMut<'a, T>;
+    type Item = parallel_hash_table::EntryMut<'a, T>;
+    fn into_par_iter(self) -> Self::Iter {
+        ParallelHashTableParIterMut(self)
     }
 }

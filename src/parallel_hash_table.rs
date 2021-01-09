@@ -8,6 +8,7 @@ use core::{
     mem,
     mem::MaybeUninit,
     num::NonZeroUsize,
+    ops::{Deref, Range},
     slice,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -86,6 +87,9 @@ impl AtomicState {
     }
     fn into_inner(self) -> State {
         State(self.0.into_inner())
+    }
+    fn get_mut(&mut self) -> &mut State {
+        unsafe { mem::transmute(self.0.get_mut()) }
     }
     fn compare_exchange_weak(
         &self,
@@ -232,6 +236,22 @@ impl<T, W> ParallelHashTable<T, W> {
     pub fn iter(&self) -> Iter<T> {
         self.into_iter()
     }
+    pub fn iter_mut(&mut self) -> IterMut<T> {
+        self.into_iter()
+    }
+}
+
+impl<T, W> Drop for ParallelHashTable<T, W> {
+    fn drop(&mut self) {
+        // safety: must work correctly when self.states and self.values are left empty by self.into_iter()
+        mem::drop(IntoIter {
+            states: mem::replace(&mut self.states, Box::new([]))
+                .into_vec()
+                .into_iter()
+                .enumerate(),
+            values: mem::replace(&mut self.values, Box::new([])),
+        });
+    }
 }
 
 impl<T: fmt::Debug, W> fmt::Debug for ParallelHashTable<T, W> {
@@ -370,6 +390,12 @@ pub struct IntoIter<T> {
 unsafe impl<T: Sync + Send> Sync for IntoIter<T> {}
 unsafe impl<T: Sync + Send> Send for IntoIter<T> {}
 
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        self.for_each(mem::drop);
+    }
+}
+
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
@@ -405,17 +431,69 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 impl<T, H> IntoIterator for ParallelHashTable<T, H> {
     type Item = T;
     type IntoIter = IntoIter<T>;
-    fn into_iter(self) -> Self::IntoIter {
+    fn into_iter(mut self) -> Self::IntoIter {
         IntoIter {
-            states: self.states.into_vec().into_iter().enumerate(),
-            values: self.values,
+            states: mem::replace(&mut self.states, Box::new([]))
+                .into_vec()
+                .into_iter()
+                .enumerate(),
+            values: mem::replace(&mut self.values, Box::new([])),
         }
+        // self.drop() works with zero-length states and values
     }
 }
 
 pub struct Iter<'a, T> {
     states: iter::Enumerate<slice::Iter<'a, AtomicState>>,
     values: &'a [UnsafeCell<MaybeUninit<T>>],
+}
+
+fn split_iter<T: Clone + DoubleEndedIterator + ExactSizeIterator>(iter: T) -> (T, Option<T>) {
+    if iter.len() <= 1 {
+        return (iter, None);
+    }
+    let mut first_half = iter.clone();
+    let mut last_half = iter;
+    let mid = first_half.len() / 2;
+    first_half.nth_back(first_half.len() - mid - 1);
+    last_half.nth(mid - 1);
+    (first_half, Some(last_half))
+}
+
+#[cfg(test)]
+#[test]
+fn test_split_iter() {
+    assert_eq!(split_iter(1..1), (1..1, None));
+    assert_eq!(split_iter(1..2), (1..2, None));
+    assert_eq!(split_iter(1..3), (1..2, Some(2..3)));
+    assert_eq!(split_iter(1..4), (1..2, Some(2..4)));
+    assert_eq!(split_iter(1..5), (1..3, Some(3..5)));
+    assert_eq!(split_iter(1..6), (1..3, Some(3..6)));
+}
+
+impl<'a, T> Iter<'a, T> {
+    pub fn split(&self) -> (Self, Option<Self>) {
+        let (first_half, last_half) = split_iter(self.states.clone());
+        (
+            Self {
+                states: first_half,
+                values: self.values,
+            },
+            last_half.map(|states| Self {
+                states,
+                values: self.values,
+            }),
+        )
+    }
+}
+
+impl<'a, T> Clone for Iter<'a, T> {
+    fn clone(&self) -> Self {
+        Self {
+            states: self.states.clone(),
+            values: self.values,
+        }
+    }
 }
 
 unsafe impl<T: Sync + Send> Sync for Iter<'_, T> {}
@@ -459,6 +537,98 @@ impl<'a, T, H> IntoIterator for &'a ParallelHashTable<T, H> {
     fn into_iter(self) -> Self::IntoIter {
         Iter {
             states: self.states.iter().enumerate(),
+            values: &self.values,
+        }
+    }
+}
+
+pub struct EntryMut<'a, T> {
+    state: &'a mut AtomicState,
+    value: &'a UnsafeCell<MaybeUninit<T>>,
+}
+
+unsafe impl<T: Sync + Send> Sync for EntryMut<'_, T> {}
+unsafe impl<T: Sync + Send> Send for EntryMut<'_, T> {}
+
+impl<'a, T> EntryMut<'a, T> {
+    pub fn remove(self) -> T {
+        *self.state = AtomicState::new(State::EMPTY);
+        unsafe { self.value.get().read().assume_init() }
+    }
+}
+
+impl<'a, T> Deref for EntryMut<'a, T> {
+    type Target = T;
+    fn deref<'b>(&'b self) -> &'b Self::Target {
+        unsafe { &*(self.value.get() as *const T) }
+    }
+}
+
+pub struct IterMut<'a, T> {
+    range: Range<usize>,
+    states: *mut AtomicState,
+    values: &'a [UnsafeCell<MaybeUninit<T>>],
+}
+
+impl<'a, T> IterMut<'a, T> {
+    pub fn split(self) -> (Self, Option<Self>) {
+        let (first_half, last_half) = split_iter(self.range.clone());
+        (
+            Self {
+                range: first_half,
+                ..self
+            },
+            last_half.map(|range| Self { range, ..self }),
+        )
+    }
+}
+
+unsafe impl<T: Sync + Send> Sync for IterMut<'_, T> {}
+unsafe impl<T: Sync + Send> Send for IterMut<'_, T> {}
+
+impl<'a, T> Iterator for IterMut<'a, T> {
+    type Item = EntryMut<'a, T>;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(index) = self.range.next() {
+            let state = unsafe { &mut *self.states.offset(index as isize) };
+            if state.get_mut().is_full() {
+                return Some(EntryMut {
+                    state,
+                    value: &self.values[index],
+                });
+            }
+        }
+        None
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.range.len()))
+    }
+}
+
+impl<'a, T> FusedIterator for IterMut<'a, T> {}
+
+impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        while let Some(index) = self.range.next_back() {
+            let state = unsafe { &mut *self.states.offset(index as isize) };
+            if state.get_mut().is_full() {
+                return Some(EntryMut {
+                    state,
+                    value: &self.values[index],
+                });
+            }
+        }
+        None
+    }
+}
+
+impl<'a, T, H> IntoIterator for &'a mut ParallelHashTable<T, H> {
+    type Item = EntryMut<'a, T>;
+    type IntoIter = IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        IterMut {
+            range: 0..self.capacity(),
+            states: self.states.as_mut_ptr(),
             values: &self.values,
         }
     }
