@@ -39,15 +39,6 @@ impl<T: WaitWake> WaitWake for &'_ T {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u32)]
-enum StateKind {
-    Empty = 0,
-    Locked = 1,
-    LockedWaiters = 2,
-    Full = 3,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(transparent)]
 struct State(u32);
 
@@ -56,14 +47,6 @@ impl State {
     const LOCKED: Self = Self(1);
     const LOCKED_WAITERS: Self = Self(2);
     const FIRST_FULL: Self = Self(3);
-    const fn kind(self) -> StateKind {
-        match self {
-            Self::EMPTY => StateKind::Empty,
-            Self::LOCKED => StateKind::Locked,
-            Self::LOCKED_WAITERS => StateKind::LockedWaiters,
-            _ => StateKind::Full,
-        }
-    }
     const fn is_empty(self) -> bool {
         self.0 == Self::EMPTY.0
     }
@@ -117,36 +100,6 @@ impl AtomicState {
     }
     fn swap(&self, new: State, order: Ordering) -> State {
         State(self.0.swap(new.0, order))
-    }
-    unsafe fn locked_load<W: WaitWake>(&self, wait_waker: &W) -> State {
-        let mut spin_count = 0;
-        let mut state = self.load(Ordering::Acquire);
-        loop {
-            match state.kind() {
-                StateKind::Empty | StateKind::Full => return state,
-                StateKind::Locked | StateKind::LockedWaiters => {
-                    spin_loop();
-                    if spin_count < 32 {
-                        spin_count += 1;
-                        state = self.load(Ordering::Acquire);
-                        continue;
-                    }
-                    if let Err(v) = self.compare_exchange_weak(
-                        state,
-                        State::LOCKED_WAITERS,
-                        Ordering::Acquire,
-                        Ordering::Acquire,
-                    ) {
-                        state = v;
-                        continue;
-                    }
-                    wait_waker.wait(
-                        NonZeroUsize::new_unchecked(self as *const _ as usize),
-                        || self.load(Ordering::Acquire) != State::LOCKED_WAITERS,
-                    );
-                }
-            }
-        }
     }
     unsafe fn write_start<W: WaitWake>(&self, wait_waker: &W) -> Result<(), State> {
         let mut spin_count = 0;
@@ -248,6 +201,12 @@ impl<T, W> ParallelHashTable<T, W> {
     pub fn iter_mut(&mut self) -> IterMut<T> {
         self.into_iter()
     }
+    pub fn wait_waker(&self) -> &W {
+        &self.wait_waker
+    }
+    pub fn wait_waker_mut(&mut self) -> &mut W {
+        &mut self.wait_waker
+    }
 }
 
 impl<T, W> Drop for ParallelHashTable<T, W> {
@@ -346,7 +305,7 @@ impl<T, W: WaitWake> ParallelHashTable<T, W> {
         let expected = State::make_full(hash);
         for (state, value) in self.probe_sequence(hash) {
             unsafe {
-                let state = state.locked_load(&self.wait_waker);
+                let state = state.load(Ordering::Acquire);
                 if state == expected {
                     let value = &*(value.get() as *const T);
                     if entry_eq(value) {
@@ -646,14 +605,24 @@ impl<'a, T, H> IntoIterator for &'a mut ParallelHashTable<T, H> {
 #[cfg(test)]
 mod test {
     use super::{LockResult, ParallelHashTable, WaitWake};
-    use alloc::vec::Vec;
+    use crate::std_support::StdWaitWake;
+    use alloc::{sync::Arc, vec::Vec};
     use core::{
+        cell::Cell,
         hash::{BuildHasher, Hash, Hasher},
         marker::PhantomData,
+        mem,
         num::NonZeroUsize,
         sync::atomic::{AtomicU8, Ordering},
     };
-    use hashbrown::{hash_map::DefaultHashBuilder, HashSet};
+    use hashbrown::{hash_map::DefaultHashBuilder, HashMap, HashSet};
+    use std::{
+        sync::{
+            mpsc::{sync_channel, Receiver},
+            Condvar, Mutex,
+        },
+        thread,
+    };
 
     #[derive(Clone, Copy, Default, Debug)]
     struct SingleThreadedWaitWake(PhantomData<*mut ()>);
@@ -740,5 +709,183 @@ mod test {
         let entries: Vec<Entry> = ht.iter().cloned().collect();
         let entries2: Vec<Entry> = ht.into_iter().collect();
         assert_eq!(entries, entries2);
+    }
+
+    #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
+    struct ThreadIndex(u32);
+
+    std::thread_local! {
+        static THREAD_INDEX: Cell<Option<ThreadIndex>> = Cell::new(None);
+    }
+
+    struct WaitWakeTracker<W> {
+        wait_set: Mutex<HashMap<ThreadIndex, NonZeroUsize>>,
+        wait_set_changed: Condvar,
+        inner_wait_wake: W,
+    }
+
+    impl<W> WaitWakeTracker<W> {
+        fn new(inner_wait_wake: W) -> Self {
+            Self {
+                wait_set: Mutex::new(HashMap::new()),
+                wait_set_changed: Condvar::new(),
+                inner_wait_wake,
+            }
+        }
+    }
+
+    impl<W: WaitWake> WaitWake for WaitWakeTracker<W> {
+        unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
+            THREAD_INDEX.with(|thread_index| {
+                let mut lock = self.wait_set.lock().unwrap();
+                lock.insert(thread_index.get().unwrap(), key);
+                self.wait_set_changed.notify_all();
+            });
+            self.inner_wait_wake.wait(key, should_cancel);
+            THREAD_INDEX.with(|thread_index| {
+                let mut lock = self.wait_set.lock().unwrap();
+                lock.remove(&thread_index.get().unwrap());
+                self.wait_set_changed.notify_all();
+            });
+        }
+
+        unsafe fn wake_all(&self, key: NonZeroUsize) {
+            self.inner_wait_wake.wake_all(key);
+        }
+    }
+
+    #[test]
+    fn lock_test() {
+        enum Op {
+            InsertIntoEmpty(Entry),
+            AttemptInsertIntoFull(Entry),
+            LockEntry(Entry),
+            CancelLock,
+            FillLock,
+            Finish,
+            Sync,
+        }
+        let ht = Arc::new(ParallelHashTable::new(8, WaitWakeTracker::new(StdWaitWake)));
+        let hasher = DefaultHashBuilder::new();
+        let hasher = move |entry: &Entry| -> u64 {
+            let mut hasher = hasher.build_hasher();
+            entry.hash(&mut hasher);
+            hasher.finish()
+        };
+        let thread_fn = {
+            let ht = ht.clone();
+            let hasher = hasher.clone();
+            move |thread_index, op_channel: Receiver<Op>| {
+                THREAD_INDEX.with(|v| v.set(Some(thread_index)));
+                loop {
+                    match op_channel.recv().unwrap() {
+                        Op::Sync => {}
+                        Op::InsertIntoEmpty(entry) => {
+                            match ht.lock_entry(hasher(&entry), |v| *v == entry).unwrap() {
+                                LockResult::Vacant(lock) => lock.fill(entry),
+                                LockResult::Full(_) => {
+                                    panic!("failed to lock already full entry: {:?}", entry);
+                                }
+                            };
+                        }
+                        Op::AttemptInsertIntoFull(entry) => {
+                            match ht.lock_entry(hasher(&entry), |v| *v == entry).unwrap() {
+                                LockResult::Vacant(_) => panic!("expected full entry: {:?}", entry),
+                                LockResult::Full(v) => assert_eq!(v, &entry),
+                            };
+                        }
+                        Op::LockEntry(entry) => {
+                            let lock = match ht.lock_entry(hasher(&entry), |v| *v == entry).unwrap()
+                            {
+                                LockResult::Vacant(lock) => lock,
+                                LockResult::Full(_) => {
+                                    panic!("failed to lock already full entry: {:?}", entry);
+                                }
+                            };
+                            loop {
+                                match op_channel.recv().unwrap() {
+                                    Op::Sync => {}
+                                    Op::CancelLock => break,
+                                    Op::FillLock => {
+                                        lock.fill(entry);
+                                        break;
+                                    }
+                                    Op::InsertIntoEmpty(_)
+                                    | Op::AttemptInsertIntoFull(_)
+                                    | Op::LockEntry(_)
+                                    | Op::Finish => panic!("locked"),
+                                }
+                            }
+                        }
+                        Op::CancelLock | Op::FillLock => panic!("not locked"),
+                        Op::Finish => break,
+                    }
+                }
+            }
+        };
+        const THREAD_COUNT: u32 = 3;
+        let threads: Vec<_> = (0..THREAD_COUNT)
+            .map(|i| {
+                let f = thread_fn.clone();
+                let (sender, receiver) = sync_channel(0);
+                (thread::spawn(move || f(ThreadIndex(i), receiver)), sender)
+            })
+            .collect();
+        let send_op = |thread_index: usize, op| threads[thread_index].1.send(op).unwrap();
+        let assert_contents = |expected: &[&Entry]| {
+            let expected: HashSet<_> = expected.iter().copied().collect();
+            let actual: HashSet<_> = ht.iter().collect();
+            assert_eq!(expected, actual);
+        };
+        let wait_for_thread_to_wait = |thread_index: u32| {
+            let wait_waker = ht.wait_waker();
+            let _ = ht
+                .wait_waker()
+                .wait_set_changed
+                .wait_while(wait_waker.wait_set.lock().unwrap(), |v| {
+                    !v.contains_key(&ThreadIndex(thread_index))
+                })
+                .unwrap();
+        };
+        let assert_find =
+            |entry, expected| assert_eq!(ht.find(hasher(entry), |v| v == entry), expected);
+        let entry1 = Entry::new();
+        send_op(0, Op::InsertIntoEmpty(entry1.clone()));
+        send_op(0, Op::Sync);
+        assert_contents(&[&entry1]);
+        assert_find(&entry1, Some(&entry1));
+        let entry2 = Entry::new();
+        assert_find(&entry2, None);
+        send_op(0, Op::LockEntry(entry2.clone()));
+        send_op(0, Op::Sync);
+        assert_find(&entry2, None);
+        send_op(1, Op::InsertIntoEmpty(entry2.clone()));
+        wait_for_thread_to_wait(1);
+        assert_contents(&[&entry1]);
+        assert_find(&entry2, None);
+        send_op(0, Op::CancelLock);
+        send_op(1, Op::Sync);
+        assert_contents(&[&entry1, &entry2]);
+        assert_find(&entry2, Some(&entry2));
+        let entry3 = Entry::new();
+        send_op(0, Op::LockEntry(entry3.clone()));
+        send_op(0, Op::Sync);
+        assert_find(&entry3, None);
+        send_op(1, Op::AttemptInsertIntoFull(entry3.clone()));
+        send_op(2, Op::AttemptInsertIntoFull(entry3.clone()));
+        wait_for_thread_to_wait(1);
+        wait_for_thread_to_wait(2);
+        assert_find(&entry3, None);
+        assert_contents(&[&entry1, &entry2]);
+        send_op(0, Op::FillLock);
+        send_op(1, Op::Sync);
+        send_op(2, Op::Sync);
+        assert_find(&entry3, Some(&entry3));
+        assert_contents(&[&entry1, &entry2, &entry3]);
+        threads.into_iter().for_each(|(join_handle, sender)| {
+            sender.send(Op::Finish).unwrap();
+            mem::drop(sender);
+            join_handle.join().unwrap();
+        });
     }
 }
