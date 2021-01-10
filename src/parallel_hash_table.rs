@@ -29,6 +29,15 @@ pub trait WaitWake {
     unsafe fn wake_all(&self, key: NonZeroUsize);
 }
 
+impl<T: WaitWake> WaitWake for &'_ T {
+    unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
+        (**self).wait(key, should_cancel);
+    }
+    unsafe fn wake_all(&self, key: NonZeroUsize) {
+        (**self).wake_all(key);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 enum StateKind {
@@ -631,5 +640,105 @@ impl<'a, T, H> IntoIterator for &'a mut ParallelHashTable<T, H> {
             states: self.states.as_mut_ptr(),
             values: &self.values,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{LockResult, ParallelHashTable, WaitWake};
+    use alloc::vec::Vec;
+    use core::{
+        hash::{BuildHasher, Hash, Hasher},
+        marker::PhantomData,
+        num::NonZeroUsize,
+        sync::atomic::{AtomicU8, Ordering},
+    };
+    use hashbrown::{hash_map::DefaultHashBuilder, HashSet};
+
+    #[derive(Clone, Copy, Default, Debug)]
+    struct SingleThreadedWaitWake(PhantomData<*mut ()>);
+
+    impl WaitWake for SingleThreadedWaitWake {
+        unsafe fn wait<SC: FnOnce() -> bool>(&self, _key: NonZeroUsize, should_cancel: SC) {
+            should_cancel();
+        }
+        unsafe fn wake_all(&self, _key: NonZeroUsize) {}
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Entry {
+        hash: u8,
+        non_hash: u8,
+    }
+
+    impl Hash for Entry {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.hash.hash(state);
+        }
+    }
+
+    impl Entry {
+        fn new() -> Self {
+            static NEXT_HASH: AtomicU8 = AtomicU8::new(1);
+            static NEXT_NON_HASH: AtomicU8 = AtomicU8::new(1);
+            let hash = NEXT_HASH.fetch_add(1, Ordering::Relaxed);
+            Self {
+                hash,
+                non_hash: NEXT_NON_HASH.fetch_add(hash, Ordering::Relaxed),
+            }
+        }
+    }
+
+    #[test]
+    fn test1() {
+        let mut ht: ParallelHashTable<Entry, SingleThreadedWaitWake> =
+            ParallelHashTable::new(6, Default::default());
+        let hasher = DefaultHashBuilder::new();
+        let hasher = |entry: &Entry| -> u64 {
+            let mut hasher = hasher.build_hasher();
+            entry.hash(&mut hasher);
+            hasher.finish()
+        };
+        let mut reference_ht = HashSet::<Entry>::new();
+        for i in 0..100000u64 {
+            if i.wrapping_mul(0x40FA_5283_D1A3_292B_u64) >> 56 == 0 {
+                let entries: Vec<Entry> = ht.iter().cloned().collect();
+                let entries2: Vec<Entry> = ht.iter_mut().map(|v| v.remove()).collect();
+                assert_eq!(entries, entries2);
+                for entry in entries {
+                    assert_eq!(reference_ht.take(&entry), Some(entry));
+                }
+                assert!(reference_ht.is_empty());
+            } else if i.wrapping_mul(0xA331_ABB2_E016_BC0A_u64) >> 63 != 0 {
+                let entry = Entry::new();
+                match ht.lock_entry(hasher(&entry), |v| *v == entry) {
+                    Ok(LockResult::Vacant(locked_entry)) => {
+                        assert_eq!(*locked_entry.fill(entry.clone()), entry);
+                        assert!(
+                            reference_ht.insert(entry.clone()),
+                            "failed to insert {:?}",
+                            entry
+                        );
+                    }
+                    Ok(LockResult::Full(old_entry)) => {
+                        assert_eq!(reference_ht.get(&entry), Some(old_entry));
+                    }
+                    Err(super::NotEnoughSpace) => {
+                        assert!(reference_ht.len() >= ht.probe_distance());
+                    }
+                }
+            } else {
+                for _ in 0..10 {
+                    let entry = Entry::new();
+                    assert_eq!(
+                        ht.find(hasher(&entry), |v| *v == entry),
+                        reference_ht.get(&entry)
+                    );
+                }
+            }
+        }
+        let entries: Vec<Entry> = ht.iter().cloned().collect();
+        let entries2: Vec<Entry> = ht.into_iter().collect();
+        assert_eq!(entries, entries2);
     }
 }
