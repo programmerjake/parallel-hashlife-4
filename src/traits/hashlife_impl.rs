@@ -5,13 +5,13 @@ use crate::{
     NodeAndLevel,
 };
 
-pub(crate) fn recursive_hashlife_compute_node_next<HL, const DIMENSION: usize>(
-    hl: &HL,
+pub(crate) fn recursive_hashlife_compute_node_next<'a, HL, const DIMENSION: usize>(
+    hl: &'a HL,
     node: NodeAndLevel<HL::NodeId>,
     log2_step_size: usize,
 ) -> Result<NodeAndLevel<HL::NodeId>, HL::Error>
 where
-    HL: Hashlife<DIMENSION> + ?Sized,
+    HL: Hashlife<'a, DIMENSION> + ?Sized,
     HL::Error: TheSend,
     HL::NodeId: TheSend + TheSync,
     HL::Leaf: TheSend,

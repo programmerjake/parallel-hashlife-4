@@ -36,7 +36,7 @@ where
     }
 }
 
-pub trait Hashlife<const DIMENSION: usize>: HashlifeData<DIMENSION> + Sync
+pub trait Hashlife<'a, const DIMENSION: usize>: HashlifeData<'a, DIMENSION> + Sync
 where
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -48,7 +48,7 @@ where
     Self: ParallelBuildArray<<Self as HasNodeType<DIMENSION>>::NodeId, 2, DIMENSION>,
 {
     fn recursive_hashlife_compute_node_next(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
         log2_step_size: usize,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
@@ -56,9 +56,9 @@ where
     }
 }
 
-impl<T: ?Sized, const DIMENSION: usize> Hashlife<DIMENSION> for T
+impl<'a, T: ?Sized, const DIMENSION: usize> Hashlife<'a, DIMENSION> for T
 where
-    Self: HashlifeData<DIMENSION>,
+    Self: HashlifeData<'a, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,

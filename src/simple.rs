@@ -232,7 +232,8 @@ where
     }
 }
 
-impl<LeafData, const DIMENSION: usize> HashlifeData<DIMENSION> for Simple<LeafData, DIMENSION>
+impl<'a, LeafData, const DIMENSION: usize> HashlifeData<'a, DIMENSION>
+    for Simple<LeafData, DIMENSION>
 where
     LeafData: LeafStep<DIMENSION>,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,

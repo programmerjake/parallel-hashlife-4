@@ -164,7 +164,7 @@ impl<Node, Leaf> NodeOrLeaf<Node, Leaf> {
     }
 }
 
-pub trait HashlifeData<const DIMENSION: usize>:
+pub trait HashlifeData<'a, const DIMENSION: usize>:
     HasErrorType + LeafStep<DIMENSION> + HasNodeType<DIMENSION>
 where
     IndexVec<DIMENSION>: IndexVecExt,
@@ -173,30 +173,30 @@ where
 {
     /// key.level is the level of the nodes in key
     fn intern_non_leaf_node(
-        &self,
+        &'a self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error>;
     fn intern_leaf_node(
-        &self,
+        &'a self,
         key: Array<Self::Leaf, 2, DIMENSION>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error>;
     /// retval.node().level is the level of the nodes in retval.node()
     fn get_node_key(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> NodeOrLeaf<NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>, Array<Self::Leaf, 2, DIMENSION>>;
     fn get_non_leaf_node_next(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Option<NodeAndLevel<Self::NodeId>>;
     fn fill_non_leaf_node_next(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
         new_next: NodeAndLevel<Self::NodeId>,
     );
-    fn get_empty_node(&self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error>;
+    fn get_empty_node(&'a self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error>;
     fn get_center(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         assert_ne!(node.level, 0, "leaf node has no center");
@@ -224,7 +224,7 @@ where
         }
     }
     fn expand_root(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         let level = node.level;
@@ -273,50 +273,50 @@ where
     }
 }
 
-impl<T, const DIMENSION: usize> HashlifeData<DIMENSION> for &T
+impl<'a, 'b, T, const DIMENSION: usize> HashlifeData<'a, DIMENSION> for &'b T
 where
-    T: ?Sized + HashlifeData<DIMENSION>,
+    T: ?Sized + HashlifeData<'a, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     Array<T::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<T::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     fn intern_non_leaf_node(
-        &self,
+        &'a self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         (**self).intern_non_leaf_node(key)
     }
     fn intern_leaf_node(
-        &self,
+        &'a self,
         key: Array<Self::Leaf, 2, DIMENSION>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         (**self).intern_leaf_node(key)
     }
     fn get_node_key(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> NodeOrLeaf<NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>, Array<Self::Leaf, 2, DIMENSION>>
     {
         (**self).get_node_key(node)
     }
     fn get_non_leaf_node_next(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Option<NodeAndLevel<Self::NodeId>> {
         (**self).get_non_leaf_node_next(node)
     }
     fn fill_non_leaf_node_next(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
         new_next: NodeAndLevel<Self::NodeId>,
     ) {
         (**self).fill_non_leaf_node_next(node, new_next)
     }
-    fn get_empty_node(&self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
+    fn get_empty_node(&'a self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         (**self).get_empty_node(level)
     }
     fn expand_root(
-        &self,
+        &'a self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         (**self).expand_root(node)
