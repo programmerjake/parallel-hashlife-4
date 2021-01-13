@@ -10,6 +10,7 @@ extern crate std;
 pub mod array;
 mod array_vec;
 pub mod index_vec;
+pub mod parallel;
 pub mod parallel_hash_table;
 pub mod simple;
 #[cfg(any(test, feature = "std"))]
