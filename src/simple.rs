@@ -352,7 +352,7 @@ mod test {
     use crate::{
         array::Array,
         index_vec::{IndexVec, IndexVecForEach},
-        serial::Hashlife,
+        traits::serial::Hashlife,
         HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
     };
     use std::{dbg, print, println};
