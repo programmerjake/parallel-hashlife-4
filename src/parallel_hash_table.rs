@@ -5,10 +5,12 @@ use core::{
     hint::spin_loop,
     iter,
     iter::FusedIterator,
+    marker::PhantomData,
     mem,
     mem::MaybeUninit,
     num::NonZeroUsize,
     ops::{Deref, Range},
+    ptr::NonNull,
     slice,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -155,10 +157,73 @@ impl AtomicState {
     }
 }
 
-pub struct ParallelHashTable<T, W> {
-    // states and values are always the same length, which is a power of 2
+/// use separate non-generic struct to work around drop check
+struct HashTableStorage {
     states: Box<[AtomicState]>,
-    values: Box<[UnsafeCell<MaybeUninit<T>>]>,
+    /// really a `Box<[UnsafeCell<MaybeUninit<T>>]>` with the same length as `self.states`
+    values: NonNull<()>,
+    drop_fn: unsafe fn(&mut Self),
+}
+
+impl Drop for HashTableStorage {
+    fn drop(&mut self) {
+        unsafe {
+            (self.drop_fn)(self);
+        }
+    }
+}
+
+impl HashTableStorage {
+    unsafe fn drop_fn<T>(&mut self) {
+        let (states, values) = self.take::<T>();
+        // safety: must work correctly when self.states and self.values are left empty by `ParallelHashTable::into_iter()`
+        mem::drop(IntoIter {
+            states: states.into_vec().into_iter().enumerate(),
+            values,
+        });
+    }
+    fn new<T>(states: Box<[AtomicState]>, values: Box<[UnsafeCell<MaybeUninit<T>>]>) -> Self {
+        assert_eq!(states.len(), values.len());
+        unsafe {
+            Self {
+                states,
+                values: NonNull::new_unchecked(Box::into_raw(values) as *mut ()),
+                drop_fn: Self::drop_fn::<T>,
+            }
+        }
+    }
+    unsafe fn take<T>(&mut self) -> (Box<[AtomicState]>, Box<[UnsafeCell<MaybeUninit<T>>]>) {
+        let states = mem::replace(&mut self.states, Box::new([]));
+        let replacement_values = NonNull::new_unchecked(
+            Box::<[UnsafeCell<MaybeUninit<T>>]>::into_raw(Box::new([])) as *mut (),
+        );
+        let values = Box::from_raw(slice::from_raw_parts_mut(
+            mem::replace(&mut self.values, replacement_values).as_ptr()
+                as *mut UnsafeCell<MaybeUninit<T>>,
+            states.len(),
+        ));
+        (states, values)
+    }
+    unsafe fn values<T>(&self) -> &[UnsafeCell<MaybeUninit<T>>] {
+        slice::from_raw_parts(
+            self.values.as_ptr() as *const UnsafeCell<MaybeUninit<T>>,
+            self.states.len(),
+        )
+    }
+    unsafe fn states_values_mut<T>(
+        &mut self,
+    ) -> (&mut [AtomicState], &mut [UnsafeCell<MaybeUninit<T>>]) {
+        let values = slice::from_raw_parts_mut(
+            self.values.as_ptr() as *mut UnsafeCell<MaybeUninit<T>>,
+            self.states.len(),
+        );
+        (&mut self.states, values)
+    }
+}
+
+pub struct ParallelHashTable<T, W> {
+    storage: HashTableStorage,
+    _phantom: PhantomData<T>,
     wait_waker: W,
     probe_distance: usize,
 }
@@ -183,14 +248,14 @@ impl<T, W> ParallelHashTable<T, W> {
         let mut states = Vec::with_capacity(capacity);
         states.resize_with(capacity, || AtomicState::new(State::EMPTY));
         Self {
-            states: states.into(),
-            values: values.into(),
+            storage: HashTableStorage::new::<T>(states.into(), values.into()),
+            _phantom: PhantomData,
             wait_waker,
             probe_distance,
         }
     }
     pub fn capacity(&self) -> usize {
-        self.states.len()
+        self.storage.states.len()
     }
     pub fn probe_distance(&self) -> usize {
         self.probe_distance
@@ -206,19 +271,6 @@ impl<T, W> ParallelHashTable<T, W> {
     }
     pub fn wait_waker_mut(&mut self) -> &mut W {
         &mut self.wait_waker
-    }
-}
-
-impl<T, W> Drop for ParallelHashTable<T, W> {
-    fn drop(&mut self) {
-        // safety: must work correctly when self.states and self.values are left empty by self.into_iter()
-        mem::drop(IntoIter {
-            states: mem::replace(&mut self.states, Box::new([]))
-                .into_vec()
-                .into_iter()
-                .enumerate(),
-            values: mem::replace(&mut self.values, Box::new([])),
-        });
     }
 }
 
@@ -293,8 +345,8 @@ impl<T, W> ParallelHashTable<T, W> {
         ProbeSequence {
             index: hash as usize,
             mask,
-            states: &self.states,
-            values: &self.values,
+            states: &self.storage.states,
+            values: unsafe { self.storage.values() },
         }
         .take(self.probe_distance)
     }
@@ -400,14 +452,12 @@ impl<T, H> IntoIterator for ParallelHashTable<T, H> {
     type Item = T;
     type IntoIter = IntoIter<T>;
     fn into_iter(mut self) -> Self::IntoIter {
+        let (states, values) = unsafe { self.storage.take::<T>() };
         IntoIter {
-            states: mem::replace(&mut self.states, Box::new([]))
-                .into_vec()
-                .into_iter()
-                .enumerate(),
-            values: mem::replace(&mut self.values, Box::new([])),
+            states: states.into_vec().into_iter().enumerate(),
+            values,
         }
-        // self.drop() works with zero-length states and values
+        // `HashTableStorage::drop()` works after calling `HashTableStorage::take()`
     }
 }
 
@@ -504,8 +554,8 @@ impl<'a, T, H> IntoIterator for &'a ParallelHashTable<T, H> {
     type IntoIter = Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
         Iter {
-            states: self.states.iter().enumerate(),
-            values: &self.values,
+            states: self.storage.states.iter().enumerate(),
+            values: unsafe { self.storage.values::<T>() },
         }
     }
 }
@@ -594,10 +644,11 @@ impl<'a, T, H> IntoIterator for &'a mut ParallelHashTable<T, H> {
     type Item = EntryMut<'a, T>;
     type IntoIter = IterMut<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
+        let (states, values) = unsafe { self.storage.states_values_mut::<T>() };
         IterMut {
-            range: 0..self.capacity(),
-            states: self.states.as_mut_ptr(),
-            values: &self.values,
+            range: 0..states.len(),
+            states: states.as_mut_ptr(),
+            values,
         }
     }
 }
@@ -608,12 +659,12 @@ mod test {
     use crate::std_support::StdWaitWake;
     use alloc::{sync::Arc, vec::Vec};
     use core::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         hash::{BuildHasher, Hash, Hasher},
         marker::PhantomData,
         mem,
         num::NonZeroUsize,
-        sync::atomic::{AtomicU8, Ordering},
+        sync::atomic::{AtomicU8, AtomicUsize, Ordering},
     };
     use hashbrown::{hash_map::DefaultHashBuilder, HashMap, HashSet};
     use std::{
@@ -656,6 +707,97 @@ mod test {
                 non_hash: NEXT_NON_HASH.fetch_add(hash, Ordering::Relaxed),
             }
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EntryWithLifetime<'a>(Entry, RefCell<Option<&'a EntryWithLifetime<'a>>>);
+
+    impl Hash for EntryWithLifetime<'_> {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.0.hash(state);
+        }
+    }
+
+    impl PartialEq for EntryWithLifetime<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+
+    #[test]
+    fn arena_test() {
+        let ht: ParallelHashTable<EntryWithLifetime, SingleThreadedWaitWake> =
+            ParallelHashTable::new(2, Default::default());
+        let hasher = DefaultHashBuilder::new();
+        let hasher = |entry: &EntryWithLifetime| -> u64 {
+            let mut hasher = hasher.build_hasher();
+            entry.hash(&mut hasher);
+            hasher.finish()
+        };
+        let entry1 = EntryWithLifetime(Entry::new(), RefCell::new(None));
+        let entry_ref1 = match ht.lock_entry(hasher(&entry1), |v| *v == entry1) {
+            Ok(LockResult::Vacant(locked_entry)) => {
+                let v = locked_entry.fill(entry1.clone());
+                assert_eq!(*v, entry1);
+                v
+            }
+            Ok(LockResult::Full(_)) => unreachable!(),
+            Err(super::NotEnoughSpace) => unreachable!(),
+        };
+        let entry2 = EntryWithLifetime(Entry::new(), RefCell::new(None));
+        let entry_ref2 = match ht.lock_entry(hasher(&entry2), |v| *v == entry2) {
+            Ok(LockResult::Vacant(locked_entry)) => {
+                let v = locked_entry.fill(entry2.clone());
+                assert_eq!(*v, entry2);
+                v
+            }
+            Ok(LockResult::Full(_)) => unreachable!(),
+            Err(super::NotEnoughSpace) => unreachable!(),
+        };
+        *entry_ref1.1.borrow_mut() = Some(entry_ref2);
+    }
+
+    struct DropTestHelper<'a>(&'a AtomicUsize);
+
+    impl Drop for DropTestHelper<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn drop_test() {
+        let item1_count = AtomicUsize::new(0);
+        let item2_count = AtomicUsize::new(0);
+        let ht: ParallelHashTable<(Entry, DropTestHelper), SingleThreadedWaitWake> =
+            ParallelHashTable::new(6, Default::default());
+        let hasher = DefaultHashBuilder::new();
+        let hasher = |entry: &Entry| -> u64 {
+            let mut hasher = hasher.build_hasher();
+            entry.hash(&mut hasher);
+            hasher.finish()
+        };
+        let entry1 = Entry::new();
+        match ht.lock_entry(hasher(&entry1), |v| v.0 == entry1) {
+            Ok(LockResult::Vacant(locked_entry)) => {
+                locked_entry.fill((entry1.clone(), DropTestHelper(&item1_count)))
+            }
+            Ok(LockResult::Full(_)) => unreachable!(),
+            Err(super::NotEnoughSpace) => unreachable!(),
+        };
+        let entry2 = Entry::new();
+        match ht.lock_entry(hasher(&entry2), |v| v.0 == entry2) {
+            Ok(LockResult::Vacant(locked_entry)) => {
+                locked_entry.fill((entry2.clone(), DropTestHelper(&item2_count)))
+            }
+            Ok(LockResult::Full(_)) => unreachable!(),
+            Err(super::NotEnoughSpace) => unreachable!(),
+        };
+        assert_eq!(item1_count.load(Ordering::Relaxed), 0);
+        assert_eq!(item2_count.load(Ordering::Relaxed), 0);
+        mem::drop(ht);
+        assert_eq!(item1_count.load(Ordering::Relaxed), 1);
+        assert_eq!(item2_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]

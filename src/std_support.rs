@@ -7,8 +7,11 @@ use crate::{
 };
 use ahash::RandomState;
 use core::{
+    cmp,
     convert::TryInto,
+    fmt,
     hash::{BuildHasher, Hash, Hasher},
+    marker::PhantomData,
     num::NonZeroUsize,
     ops::Range,
     ptr,
@@ -98,8 +101,51 @@ impl WaitWake for StdWaitWake {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
-pub struct RayonParallel<Base: ?Sized>(Base);
+pub struct RayonParallel<Base: ?Sized>(PhantomData<fn(Base) -> Base>);
+
+impl<Base: ?Sized> Copy for RayonParallel<Base> {}
+
+impl<Base: ?Sized> Clone for RayonParallel<Base> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Base: ?Sized> PartialEq for RayonParallel<Base> {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl<Base: ?Sized> Eq for RayonParallel<Base> {}
+
+impl<Base: ?Sized> Hash for RayonParallel<Base> {
+    fn hash<H: Hasher>(&self, _state: &mut H) {}
+}
+
+impl<Base: ?Sized> PartialOrd for RayonParallel<Base> {
+    fn partial_cmp(&self, _other: &Self) -> Option<cmp::Ordering> {
+        Some(cmp::Ordering::Equal)
+    }
+}
+
+impl<Base: ?Sized> Ord for RayonParallel<Base> {
+    fn cmp(&self, _other: &Self) -> cmp::Ordering {
+        cmp::Ordering::Equal
+    }
+}
+
+impl<Base: ?Sized> fmt::Debug for RayonParallel<Base> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RayonParallel").finish()
+    }
+}
+
+impl<Base: ?Sized> Default for RayonParallel<Base> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
 
 impl<Base: HasErrorType + ?Sized> HasErrorType for RayonParallel<Base> {
     type Error = Base::Error;

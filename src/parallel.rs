@@ -152,27 +152,30 @@ where
     }
 }
 
-pub struct Parallel<'a, Base, W, const DIMENSION: usize>
+pub struct Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize>
 where
-    Base: HasLeafType<DIMENSION>,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: HasLeafType<DIMENSION>,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
-    hash_table: ParallelHashTable<Node<'a, Base::Leaf, DIMENSION>, W>,
+    hash_table: ParallelHashTable<Node<'a, LeafStepT::Leaf, DIMENSION>, WaitWakeT>,
     hasher: DefaultHashBuilder,
-    empty_nodes: Box<[AtomicCell<Option<NodeId<'a, Base::Leaf, DIMENSION>>>; LEVEL_COUNT]>,
-    base: Base,
+    empty_nodes: Box<[AtomicCell<Option<NodeId<'a, LeafStepT::Leaf, DIMENSION>>>; LEVEL_COUNT]>,
+    leaf_step: LeafStepT,
+    array_builder: ArrayBuilder,
 }
 
-impl<'a, Base, W, const DIMENSION: usize> Parallel<'a, Base, W, DIMENSION>
+impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize>
+    Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: HasLeafType<DIMENSION>,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: HasLeafType<DIMENSION>,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     fn from_hash_table(
-        base: Base,
-        hash_table: ParallelHashTable<Node<'a, Base::Leaf, DIMENSION>, W>,
+        leaf_step: LeafStepT,
+        array_builder: ArrayBuilder,
+        hash_table: ParallelHashTable<Node<'a, LeafStepT::Leaf, DIMENSION>, WaitWakeT>,
     ) -> Self {
         let mut empty_nodes = Vec::with_capacity(LEVEL_COUNT);
         empty_nodes.resize_with(LEVEL_COUNT, || AtomicCell::new(None));
@@ -180,20 +183,32 @@ where
             hash_table,
             hasher: DefaultHashBuilder::new(),
             empty_nodes: empty_nodes.into_boxed_slice().try_into().ok().unwrap(),
-            base,
+            leaf_step,
+            array_builder,
         }
     }
-    pub fn new(base: Base, log2_capacity: u32, wait_waker: W) -> Self {
-        Self::from_hash_table(base, ParallelHashTable::new(log2_capacity, wait_waker))
+    pub fn new(
+        leaf_step: LeafStepT,
+        array_builder: ArrayBuilder,
+        log2_capacity: u32,
+        wait_waker: WaitWakeT,
+    ) -> Self {
+        Self::from_hash_table(
+            leaf_step,
+            array_builder,
+            ParallelHashTable::new(log2_capacity, wait_waker),
+        )
     }
     pub fn with_probe_distance(
-        base: Base,
+        leaf_step: LeafStepT,
+        array_builder: ArrayBuilder,
         log2_capacity: u32,
-        wait_waker: W,
+        wait_waker: WaitWakeT,
         probe_distance: usize,
     ) -> Self {
         Self::from_hash_table(
-            base,
+            leaf_step,
+            array_builder,
             ParallelHashTable::with_probe_distance(log2_capacity, wait_waker, probe_distance),
         )
     }
@@ -203,92 +218,106 @@ where
     pub fn probe_distance(&self) -> usize {
         self.hash_table.probe_distance()
     }
-    pub fn base(&self) -> &Base {
-        &self.base
+    pub fn leaf_step(&self) -> &LeafStepT {
+        &self.leaf_step
     }
-    pub fn base_mut(&mut self) -> &mut Base {
-        &mut self.base
+    pub fn leaf_step_mut(&mut self) -> &mut LeafStepT {
+        &mut self.leaf_step
+    }
+    pub fn array_builder(&self) -> &ArrayBuilder {
+        &self.array_builder
+    }
+    pub fn array_builder_mut(&mut self) -> &mut ArrayBuilder {
+        &mut self.array_builder
     }
 }
 
-impl<'a, Base, W, const DIMENSION: usize> HasNodeType<DIMENSION>
-    for Parallel<'a, Base, W, DIMENSION>
+impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HasNodeType<DIMENSION>
+    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: HasLeafType<DIMENSION>,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<NodeId<'a, Base::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: HasLeafType<DIMENSION>,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    Array<NodeId<'a, LeafStepT::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
 {
-    type NodeId = NodeId<'a, Base::Leaf, DIMENSION>;
+    type NodeId = NodeId<'a, LeafStepT::Leaf, DIMENSION>;
 }
 
-impl<'a, Base, W, const DIMENSION: usize> HasLeafType<DIMENSION>
-    for Parallel<'a, Base, W, DIMENSION>
+impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HasLeafType<DIMENSION>
+    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: HasLeafType<DIMENSION>,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: HasLeafType<DIMENSION>,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
-    type Leaf = Base::Leaf;
+    type Leaf = LeafStepT::Leaf;
 }
 
-impl<'a, Base, W, const DIMENSION: usize> HasErrorType for Parallel<'a, Base, W, DIMENSION>
+impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HasErrorType
+    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: HasLeafType<DIMENSION> + HasErrorType,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: HasLeafType<DIMENSION> + HasErrorType,
+    ArrayBuilder: HasErrorType<Error = LeafStepT::Error>,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
-    type Error = Base::Error;
+    type Error = LeafStepT::Error;
 }
 
-impl<'a, Base, W, const DIMENSION: usize> LeafStep<DIMENSION> for Parallel<'a, Base, W, DIMENSION>
+impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> LeafStep<DIMENSION>
+    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: LeafStep<DIMENSION>,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: LeafStep<DIMENSION>,
+    ArrayBuilder: HasErrorType<Error = LeafStepT::Error>,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     fn leaf_step(
         &self,
         neighborhood: Array<Self::Leaf, 3, DIMENSION>,
     ) -> Result<Self::Leaf, Self::Error> {
-        self.base.leaf_step(neighborhood)
+        self.leaf_step.leaf_step(neighborhood)
     }
 }
 
-impl<'a, T, Base, W, const LENGTH: usize, const DIMENSION: usize>
-    ParallelBuildArray<T, LENGTH, DIMENSION> for Parallel<'a, Base, W, DIMENSION>
+impl<'a, T, LeafStepT, ArrayBuilder, WaitWakeT, const LENGTH: usize, const DIMENSION: usize>
+    ParallelBuildArray<T, LENGTH, DIMENSION>
+    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: HasLeafType<DIMENSION> + ParallelBuildArray<T, LENGTH, DIMENSION>,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: HasLeafType<DIMENSION> + HasErrorType,
+    ArrayBuilder: HasErrorType<Error = LeafStepT::Error> + ParallelBuildArray<T, LENGTH, DIMENSION>,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     T: ArrayRepr<LENGTH, DIMENSION> + Send,
     IndexVec<DIMENSION>: IndexVecExt,
-    Base::Error: Send,
+    ArrayBuilder::Error: Send,
 {
     fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Self::Error> + Sync>(
         &self,
         f: F,
     ) -> Result<Array<T, LENGTH, DIMENSION>, Self::Error> {
-        self.base.parallel_build_array(f)
+        self.array_builder.parallel_build_array(f)
     }
 }
 
-impl<'a, Base, W, const DIMENSION: usize> Parallel<'a, Base, W, DIMENSION>
+impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize>
+    Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: LeafStep<DIMENSION>,
-    Base::Leaf: Hash + Eq,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<NodeId<'a, Base::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: LeafStep<DIMENSION>,
+    ArrayBuilder: HasErrorType<Error = LeafStepT::Error>,
+    LeafStepT::Leaf: Hash + Eq,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    Array<NodeId<'a, LeafStepT::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    Base::Error: From<parallel_hash_table::NotEnoughSpace>,
-    W: WaitWake,
+    LeafStepT::Error: From<parallel_hash_table::NotEnoughSpace>,
+    WaitWakeT: WaitWake,
 {
     fn intern_node(
         &'a self,
-        node: Node<'a, Base::Leaf, DIMENSION>,
-    ) -> Result<NodeId<'a, Base::Leaf, DIMENSION>, Base::Error> {
+        node: Node<'a, LeafStepT::Leaf, DIMENSION>,
+    ) -> Result<NodeId<'a, LeafStepT::Leaf, DIMENSION>, LeafStepT::Error> {
         let mut hasher = self.hasher.build_hasher();
         node.hash(&mut hasher);
         match self
@@ -303,7 +332,7 @@ where
     fn fill_empty_nodes(
         &'a self,
         target_level: usize,
-    ) -> Result<NodeAndLevel<NodeId<'a, Base::Leaf, DIMENSION>>, Base::Error> {
+    ) -> Result<NodeAndLevel<NodeId<'a, LeafStepT::Leaf, DIMENSION>>, LeafStepT::Error> {
         let mut start_node = None;
         for (i, node) in self.empty_nodes[0..target_level].iter().enumerate().rev() {
             if let Some(node) = node.load() {
@@ -330,17 +359,18 @@ where
     }
 }
 
-impl<'a, Base, W, const DIMENSION: usize> HashlifeData<'a, DIMENSION>
-    for Parallel<'a, Base, W, DIMENSION>
+impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HashlifeData<'a, DIMENSION>
+    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
 where
-    Base: LeafStep<DIMENSION>,
-    Base::Leaf: Hash + Eq,
-    NodeId<'a, Base::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<NodeId<'a, Base::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<Base::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    LeafStepT: LeafStep<DIMENSION>,
+    ArrayBuilder: HasErrorType<Error = LeafStepT::Error>,
+    LeafStepT::Leaf: Hash + Eq,
+    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    Array<NodeId<'a, LeafStepT::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    Base::Error: From<parallel_hash_table::NotEnoughSpace>,
-    W: WaitWake,
+    LeafStepT::Error: From<parallel_hash_table::NotEnoughSpace>,
+    WaitWakeT: WaitWake,
 {
     fn intern_non_leaf_node(
         &'a self,
@@ -423,5 +453,272 @@ where
         } else {
             self.fill_empty_nodes(level)
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::Parallel;
+    use crate::{
+        array::Array,
+        index_vec::{IndexVec, IndexVecForEach},
+        parallel_hash_table::NotEnoughSpace,
+        std_support::{RayonParallel, StdWaitWake},
+        traits::parallel::Hashlife,
+        HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
+    };
+    use core::time::Duration;
+    use std::{dbg, print, println, thread};
+
+    const DIMENSION: usize = 2;
+
+    struct LeafData {
+        delay: bool,
+    }
+
+    impl HasErrorType for LeafData {
+        type Error = NotEnoughSpace;
+    }
+
+    impl HasLeafType<DIMENSION> for LeafData {
+        type Leaf = u8;
+    }
+
+    impl LeafStep<DIMENSION> for LeafData {
+        fn leaf_step(
+            &self,
+            neighborhood: crate::array::Array<Self::Leaf, 3, DIMENSION>,
+        ) -> Result<Self::Leaf, Self::Error> {
+            if self.delay {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let mut sum = 0;
+            IndexVec::<DIMENSION>::for_each_index(|index| sum += neighborhood[index], 3, ..);
+            Ok(match sum {
+                3 => 1,
+                4 if neighborhood[IndexVec([1, 1])] != 0 => 1,
+                _ => 0,
+            })
+        }
+    }
+
+    type HL<'a> = Parallel<'a, LeafData, RayonParallel<LeafData>, StdWaitWake, DIMENSION>;
+
+    type NodeId<'a> = <HL<'a> as HasNodeType<DIMENSION>>::NodeId;
+
+    fn get_leaf<'a>(
+        hl: &'a HL<'a>,
+        mut node: NodeAndLevel<NodeId<'a>>,
+        mut location: IndexVec<DIMENSION>,
+    ) -> u8 {
+        loop {
+            match hl.get_node_key(node) {
+                NodeOrLeaf::Node(key) => {
+                    let shift = key.level + 1;
+                    node = key.map_node(|key| key[location.map(|v| v >> shift)].clone());
+                    location = location.map(|v| v & ((1 << shift) - 1));
+                }
+                NodeOrLeaf::Leaf(key) => break key[location],
+            }
+        }
+    }
+
+    fn dump_2d<'a>(hl: &'a HL<'a>, node: NodeAndLevel<NodeId<'a>>, title: &str) {
+        println!("{}:", title);
+        let size = 2usize << node.level;
+        for y in 0..size {
+            for x in 0..size {
+                match get_leaf(hl, node.clone(), IndexVec([y, x])) {
+                    0 => print!("_ "),
+                    leaf => print!("{} ", leaf),
+                }
+            }
+            println!();
+        }
+    }
+
+    fn build_2d_with_helper<'a>(
+        hl: &'a HL<'a>,
+        f: &mut impl FnMut(IndexVec<DIMENSION>) -> u8,
+        outer_location: IndexVec<DIMENSION>,
+        level: usize,
+    ) -> NodeAndLevel<NodeId<'a>> {
+        if level == 0 {
+            hl.intern_leaf_node(Array::build_array(|index| {
+                f(index + outer_location.map(|v| v * 2))
+            }))
+            .unwrap()
+        } else {
+            let key = Array::build_array(|index| {
+                build_2d_with_helper(hl, f, index + outer_location.map(|v| v * 2), level - 1).node
+            });
+            hl.intern_non_leaf_node(NodeAndLevel {
+                node: key,
+                level: level - 1,
+            })
+            .unwrap()
+        }
+    }
+
+    fn build_2d_with<'a>(
+        hl: &'a HL<'a>,
+        mut f: impl FnMut(IndexVec<DIMENSION>) -> u8,
+        level: usize,
+    ) -> NodeAndLevel<NodeId<'a>> {
+        build_2d_with_helper(hl, &mut f, 0usize.into(), level)
+    }
+
+    fn build_2d<'a, const SIZE: usize>(
+        hl: &'a HL<'a>,
+        array: [[u8; SIZE]; SIZE],
+    ) -> NodeAndLevel<NodeId<'a>> {
+        assert!(SIZE.is_power_of_two());
+        assert_ne!(SIZE, 1);
+        let log2_size = SIZE.trailing_zeros();
+        let level = log2_size as usize - 1;
+        let array = Array(array);
+        build_2d_with(hl, |index| array[index], level)
+    }
+
+    fn make_hashlife<'a>(delay: bool) -> HL<'a> {
+        HL::new(
+            LeafData { delay },
+            RayonParallel::default(),
+            12,
+            StdWaitWake,
+        )
+    }
+
+    #[test]
+    fn test0() {
+        let hl = make_hashlife(false);
+        hl.get_empty_node(0).unwrap();
+    }
+
+    #[test]
+    fn test1() {
+        let hl = make_hashlife(false);
+        let hl = &hl;
+        let empty0 = build_2d(hl, [[0, 0], [0, 0]]);
+        dump_2d(&hl, empty0.clone(), "empty0");
+        assert_eq!(
+            hl.intern_leaf_node(Array([[0, 0], [0, 0]])).unwrap(),
+            empty0
+        );
+        assert_eq!(hl.get_empty_node(0).unwrap(), empty0);
+        let node0 = build_2d(&hl, [[1, 1], [1, 1]]);
+        dump_2d(&hl, node0.clone(), "node0");
+        let node1 = hl
+            .intern_non_leaf_node(NodeAndLevel {
+                node: Array([
+                    [empty0.node.clone(), empty0.node.clone()],
+                    [empty0.node.clone(), node0.node.clone()],
+                ]),
+                level: 0,
+            })
+            .unwrap();
+        dump_2d(&hl, node1.clone(), "node1");
+        assert_eq!(
+            node1,
+            build_2d(
+                &hl,
+                [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 1], [0, 0, 1, 1]]
+            )
+        );
+        let node1_next = hl.recursive_hashlife_compute_node_next(node1, 0).unwrap();
+        dump_2d(&hl, node1_next.clone(), "node1_next");
+        assert_eq!(
+            hl.get_node_key(node1_next.clone()),
+            NodeOrLeaf::Leaf(Array([[0, 0], [0, 1]]))
+        );
+    }
+
+    fn make_step0<'a>(hl: &'a HL<'a>) -> NodeAndLevel<NodeId<'a>> {
+        build_2d(
+            hl,
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ],
+        )
+    }
+
+    fn make_step80<'a>(hl: &'a HL<'a>) -> NodeAndLevel<NodeId<'a>> {
+        build_2d(
+            hl,
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ],
+        )
+    }
+
+    fn test_with_step_size(log2_step_size: usize) {
+        for &delay in &[false, true] {
+            let hl = make_hashlife(delay);
+            let mut root = make_step0(&hl);
+            dump_2d(&hl, root.clone(), "root");
+            let mut step = 0u128;
+            while step < 80 {
+                root = hl.expand_root(root).unwrap();
+                root = hl
+                    .recursive_hashlife_compute_node_next(root, log2_step_size)
+                    .unwrap();
+                step += 1 << log2_step_size;
+                dbg!(step);
+                dump_2d(&hl, root.clone(), "root");
+            }
+            let expected = make_step80(&hl);
+            dump_2d(&hl, expected.clone(), "expected");
+            assert_eq!(root, expected);
+        }
+    }
+
+    #[test]
+    fn test_step_8() {
+        test_with_step_size(3);
+    }
+
+    #[test]
+    fn test_step_4() {
+        test_with_step_size(2);
+    }
+
+    #[test]
+    fn test_step_2() {
+        test_with_step_size(1);
+    }
+
+    #[test]
+    fn test_step_1() {
+        test_with_step_size(0);
     }
 }
