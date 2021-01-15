@@ -1,7 +1,8 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt},
-    HasErrorType, HashlifeData, NodeAndLevel,
+    traits::{HasErrorType, HashlifeData},
+    NodeAndLevel,
 };
 
 #[path = "hashlife_impl.rs"]

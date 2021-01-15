@@ -2,8 +2,11 @@ use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt, IndexVecForEach},
     parallel_hash_table::{self, ParallelHashTable, WaitWake},
-    traits::parallel::ParallelBuildArray,
-    HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
+    traits::{
+        parallel::ParallelBuildArray, HasErrorType, HasLeafType, HasNodeType, HashlifeData,
+        LeafStep,
+    },
+    NodeAndLevel, NodeOrLeaf,
 };
 use alloc::{boxed::Box, vec::Vec};
 use core::{
@@ -464,8 +467,10 @@ mod test {
         index_vec::{IndexVec, IndexVecForEach},
         parallel_hash_table::NotEnoughSpace,
         std_support::{RayonParallel, StdWaitWake},
-        traits::parallel::Hashlife,
-        HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
+        traits::{
+            parallel::Hashlife, HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep,
+        },
+        NodeAndLevel, NodeOrLeaf,
     };
     use core::time::Duration;
     use std::{dbg, print, println, thread};

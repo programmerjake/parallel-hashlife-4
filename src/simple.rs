@@ -1,7 +1,8 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt, IndexVecForEach},
-    HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
+    traits::{HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep},
+    NodeAndLevel, NodeOrLeaf,
 };
 use alloc::{rc::Rc, vec::Vec};
 use core::{
@@ -353,8 +354,10 @@ mod test {
     use crate::{
         array::Array,
         index_vec::{IndexVec, IndexVecForEach},
-        traits::serial::Hashlife,
-        HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep, NodeAndLevel, NodeOrLeaf,
+        traits::{
+            serial::Hashlife, HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep,
+        },
+        NodeAndLevel, NodeOrLeaf,
     };
     use std::{dbg, print, println};
 

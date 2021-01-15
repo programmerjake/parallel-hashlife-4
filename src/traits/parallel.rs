@@ -1,7 +1,8 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt},
-    HasErrorType, HasNodeType, HashlifeData, NodeAndLevel,
+    traits::{HasErrorType, HasNodeType, HashlifeData},
+    NodeAndLevel,
 };
 use core::marker::{Send as TheSend, Sync as TheSync};
 

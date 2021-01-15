@@ -2,8 +2,7 @@ use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt, IndexVecNonzeroDimension, Indexes},
     parallel_hash_table::{self, ParallelHashTable, WaitWake},
-    traits::parallel::ParallelBuildArray,
-    HasErrorType,
+    traits::{parallel::ParallelBuildArray, HasErrorType},
 };
 use ahash::RandomState;
 use core::{
