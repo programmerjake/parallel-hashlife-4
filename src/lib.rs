@@ -7,6 +7,8 @@ extern crate std;
 pub mod array;
 mod array_vec;
 pub mod index_vec;
+#[cfg(any(test, feature = "io"))]
+pub mod io;
 pub mod parallel;
 pub mod parallel_hash_table;
 pub mod simple;

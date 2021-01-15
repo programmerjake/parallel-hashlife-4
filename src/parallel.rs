@@ -13,15 +13,15 @@ use core::{
     convert::{TryFrom, TryInto},
     fmt,
     hash::{BuildHasher, Hash, Hasher},
-    num::NonZeroU8,
+    num::NonZeroU16,
     ptr,
 };
 use crossbeam_utils::atomic::AtomicCell;
 use hashbrown::hash_map::DefaultHashBuilder;
 use parallel_hash_table::LockResult;
 
-type LevelType = u8;
-type NonZeroLevelType = NonZeroU8;
+type LevelType = u16;
+type NonZeroLevelType = NonZeroU16;
 const LEVEL_COUNT: usize = LevelType::MAX as usize + 1;
 
 type Node<'a, Leaf, const DIMENSION: usize> =

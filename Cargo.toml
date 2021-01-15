@@ -9,7 +9,8 @@ description = "Parallel/Multithreaded 1D/2D/3D/4D/... Hashlife algorithm"
 
 [features]
 std = ["rayon"]
-default = ["std"]
+io = ["std"]
+default = ["std", "io"]
 
 [dependencies]
 hashbrown = "0.9.1"
