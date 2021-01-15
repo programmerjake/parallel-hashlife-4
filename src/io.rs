@@ -139,7 +139,7 @@ where
         let node = match line.unwrap().chars().next() {
             Some('$') | Some('.') | Some('*') if DIMENSION == 2 => {
                 const LEVEL2_SIZE: usize = 8;
-                let mut cells = [[false; LEVEL2_SIZE]; LEVEL2_SIZE];
+                let mut cells = Array([[false; LEVEL2_SIZE]; LEVEL2_SIZE]);
                 let mut x = 0;
                 let mut y = 0;
                 for ch in line.unwrap().chars() {
@@ -159,7 +159,7 @@ where
                             x += 1;
                         }
                         '*' => {
-                            cells[y][x] = true;
+                            cells[IndexVec([y, x])] = true;
                             x += 1;
                         }
                         _ => {
@@ -180,7 +180,8 @@ where
                                         let index = level0_index
                                             + level1_index.map(|v| v * 2)
                                             + level2_index.map(|v| v * 4);
-                                        if cells[index.0[0]][index.0[1]] {
+                                        let index = IndexVec([index.0[0], index.0[1]]);
+                                        if cells[index] {
                                             hash_life.read_leaf("1")
                                         } else {
                                             Ok(HL::Leaf::default())
