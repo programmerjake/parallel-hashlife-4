@@ -1,14 +1,22 @@
 use crate::{
     array::{Array, ArrayRepr},
-    index_vec::{IndexVec, IndexVecExt},
+    index_vec::{IndexVec, IndexVecExt, IndexVecForEach},
     traits::HashlifeData,
-    NodeAndLevel,
+    NodeAndLevel, NodeOrLeaf,
 };
-use alloc::{format, string::String, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::num::NonZeroUsize;
-use serde::de::DeserializeOwned;
+use hashbrown::{hash_map::Entry, HashMap};
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Deserializer;
-use std::io::{self, BufRead};
+use std::{
+    hash::Hash,
+    io::{self, BufRead, Write},
+};
 
 #[derive(Debug)]
 struct LineReader<R> {
@@ -84,9 +92,28 @@ pub enum MacrocellVersion {
 pub struct MacrocellHeader {
     pub version: MacrocellVersion,
     pub dimension: usize,
-    pub comment_lines: String,
+    pub comment_lines: Option<String>,
     pub generation: Option<String>,
     pub rule: Option<String>,
+    pub node_count: Option<NonZeroUsize>,
+}
+
+impl MacrocellHeader {
+    pub fn calculate_version(&self) -> MacrocellVersion {
+        if let Self {
+            version,
+            dimension: 2,
+            comment_lines: _,
+            generation: _,
+            rule: _,
+            node_count: None,
+        } = *self
+        {
+            version
+        } else {
+            MacrocellVersion::M3
+        }
+    }
 }
 
 impl Default for MacrocellHeader {
@@ -94,9 +121,10 @@ impl Default for MacrocellHeader {
         Self {
             version: MacrocellVersion::M2,
             dimension: 2,
-            comment_lines: String::new(),
+            comment_lines: None,
             generation: None,
             rule: None,
+            node_count: None,
         }
     }
 }
@@ -111,12 +139,6 @@ impl LineAccumulator {
         } else {
             self.0 = Some(line.into());
         }
-    }
-}
-
-impl From<LineAccumulator> for String {
-    fn from(v: LineAccumulator) -> Self {
-        v.0.unwrap_or_default()
     }
 }
 
@@ -166,6 +188,7 @@ impl<R: BufRead> MacrocellReader<R> {
         let mut rule = None;
         let mut generation = None;
         let mut dimension = None;
+        let mut node_count = None;
         let mut comment_lines = LineAccumulator(None);
         while let Some(comment) = line_reader.get_if(|line| line.strip_prefix("#"))? {
             match (comment.as_bytes().first(), version) {
@@ -201,6 +224,20 @@ impl<R: BufRead> MacrocellReader<R> {
                             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
                     );
                 }
+                (Some(b'N'), MacrocellVersion::M3) => {
+                    if node_count.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "duplicate node-count line",
+                        ));
+                    }
+                    node_count = Some(
+                        comment[1..]
+                            .trim_start()
+                            .parse::<NonZeroUsize>()
+                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                    );
+                }
                 (Some(b' '), _) => comment_lines.append(&comment[1..]),
                 (Some(_), _) if version != MacrocellVersion::M2 => {
                     return Err(io::Error::new(
@@ -219,9 +256,10 @@ impl<R: BufRead> MacrocellReader<R> {
             header: MacrocellHeader {
                 version,
                 dimension: dimension.unwrap_or(2),
-                comment_lines: comment_lines.into(),
+                comment_lines: comment_lines.0,
                 generation,
                 rule,
+                node_count,
             },
         })
     }
@@ -433,6 +471,23 @@ impl<R: BufRead> MacrocellReader<R> {
             }
             nodes.push(node);
         }
+        if let Some(header_node_count) = header.node_count {
+            let actual_node_count = nodes.len() - 1; // subtract 1 since node #0 isn't included in file
+            if header_node_count.get() < actual_node_count {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "too many nodes in macrocell file",
+                )
+                .into());
+            }
+            if header_node_count.get() > actual_node_count {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "too few nodes in macrocell file",
+                )
+                .into());
+            }
+        }
         let node = nodes.pop().unwrap();
         if node.level != biggest_seen_level || multiple_biggest {
             Err(io::Error::new(
@@ -443,5 +498,956 @@ impl<R: BufRead> MacrocellReader<R> {
         } else {
             Ok(node)
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct MacrocellWriter<W> {
+    writer: W,
+    header: MacrocellHeader,
+}
+
+impl<W: Write> MacrocellWriter<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            header: MacrocellHeader::default(),
+        }
+    }
+    pub fn with_header(writer: W, header: MacrocellHeader) -> Self {
+        Self { writer, header }
+    }
+    pub fn write<'a, HL, const DIMENSION: usize>(
+        self,
+        hash_life: &'a HL,
+        root_node: NodeAndLevel<HL::NodeId>,
+    ) -> Result<(), HL::Error>
+    where
+        HL: HashlifeData<'a, DIMENSION>,
+        HL::Error: From<io::Error>,
+        IndexVec<DIMENSION>: IndexVecExt,
+        Array<HL::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        Array<HL::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        HL::NodeId: Hash + Eq,
+        HL::Leaf: Serialize,
+    {
+        let Self {
+            mut writer,
+            mut header,
+        } = self;
+        let mut nodes = Vec::new();
+        nodes.push(hash_life.get_empty_node(0)?);
+        let mut nodes_map = HashMap::new();
+        for level in 0..=root_node.level {
+            nodes_map.insert(hash_life.get_empty_node(level)?.node, 0);
+        }
+        fn get_nodes<'a, HL, const DIMENSION: usize>(
+            hash_life: &'a HL,
+            node: NodeAndLevel<HL::NodeId>,
+            nodes: &mut Vec<NodeAndLevel<HL::NodeId>>,
+            nodes_map: &mut HashMap<HL::NodeId, usize>,
+        ) where
+            HL: HashlifeData<'a, DIMENSION>,
+            IndexVec<DIMENSION>: IndexVecExt,
+            Array<HL::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+            Array<HL::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+            HL::NodeId: Hash + Eq,
+        {
+            if nodes_map.contains_key(&node.node) {
+                return;
+            }
+            if let NodeOrLeaf::Node(key) = hash_life.get_node_key(node.clone()) {
+                IndexVec::<DIMENSION>::for_each_index(
+                    |index| {
+                        get_nodes(
+                            hash_life,
+                            key.as_ref().map_node(|node| node[index].clone()),
+                            nodes,
+                            nodes_map,
+                        );
+                    },
+                    2,
+                    ..,
+                );
+            }
+            if let Entry::Vacant(entry) = nodes_map.entry(node.node.clone()) {
+                let index = nodes.len();
+                nodes.push(node);
+                entry.insert(index);
+            }
+        }
+        get_nodes(hash_life, root_node.clone(), &mut nodes, &mut nodes_map);
+        if nodes.len() == 1 {
+            nodes.push(root_node);
+        } else {
+            assert_eq!(nodes.last().unwrap().node, root_node.node);
+        }
+        header.dimension = DIMENSION;
+        if header.calculate_version() != MacrocellVersion::M2 {
+            header.node_count = Some(NonZeroUsize::new(nodes.len() - 1).unwrap());
+        }
+        header.version = header.calculate_version();
+        let MacrocellHeader {
+            version,
+            dimension,
+            comment_lines,
+            generation,
+            rule,
+            node_count,
+        } = header;
+        fn write_lines(
+            writer: &mut impl Write,
+            line_prefix: &str,
+            text: Option<impl ToString>,
+        ) -> io::Result<()> {
+            if let Some(text) = text {
+                let text = text.to_string();
+                for i in text.lines() {
+                    if i.is_empty() {
+                        writeln!(writer, "{}", line_prefix)?;
+                    } else {
+                        writeln!(writer, "{} {}", line_prefix, i)?;
+                    }
+                }
+                if text.is_empty() {
+                    writeln!(writer, "{}", line_prefix)?;
+                }
+            }
+            Ok(())
+        }
+        match version {
+            MacrocellVersion::M2 => {
+                writeln!(writer, "[M2] (parallel-hashlife)")?;
+                assert_eq!(dimension, 2);
+            }
+            MacrocellVersion::M3 => {
+                writeln!(writer, "[M3] (parallel-hashlife)")?;
+                write_lines(&mut writer, "#D", Some(dimension))?;
+            }
+        }
+        write_lines(&mut writer, "#G", generation)?;
+        write_lines(&mut writer, "#R", rule)?;
+        write_lines(&mut writer, "#N", node_count)?;
+        write_lines(&mut writer, "#", comment_lines)?;
+        for node in nodes.drain(1..) {
+            match hash_life.get_node_key(node) {
+                NodeOrLeaf::Node(key) => {
+                    write!(writer, "{}", 2 + key.level)?;
+                    IndexVec::<DIMENSION>::try_for_each_index(
+                        |index| write!(writer, " {}", nodes_map[&key.node[index]]),
+                        2,
+                        ..,
+                    )?;
+                    writeln!(writer)?;
+                }
+                NodeOrLeaf::Leaf(key) => {
+                    write!(writer, "1")?;
+                    IndexVec::<DIMENSION>::try_for_each_index(
+                        |index| -> Result<(), io::Error> {
+                            write!(writer, " ")?;
+                            serde_json::to_writer(&mut writer, &key[index]).map_err(io::Error::from)
+                        },
+                        2,
+                        ..,
+                    )?;
+                    writeln!(writer)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        array::{Array, ArrayRepr},
+        index_vec::{IndexVec, IndexVecExt},
+        simple::Simple,
+        traits::{HasErrorType, HasLeafType, HashlifeData},
+        NodeAndLevel, NodeOrLeaf,
+    };
+    use alloc::{string::String, vec::Vec};
+    use core::num::NonZeroUsize;
+    use std::{io, print, println};
+
+    use super::{MacrocellHeader, MacrocellReader, MacrocellVersion, MacrocellWriter};
+
+    struct LeafData;
+
+    impl HasErrorType for LeafData {
+        type Error = io::Error;
+    }
+
+    type Leaf = Option<u8>;
+
+    impl<const DIMENSION: usize> HasLeafType<DIMENSION> for LeafData
+    where
+        Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    {
+        type Leaf = Leaf;
+    }
+
+    type NodeId<const DIMENSION: usize> = crate::simple::NodeId<Leaf, DIMENSION>;
+
+    fn get_leaf<const DIMENSION: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
+        mut node: NodeAndLevel<NodeId<DIMENSION>>,
+        mut location: IndexVec<DIMENSION>,
+    ) -> Leaf
+    where
+        Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        NodeId<DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        IndexVec<DIMENSION>: IndexVecExt,
+    {
+        loop {
+            match hl.get_node_key(node) {
+                NodeOrLeaf::Node(key) => {
+                    let shift = key.level + 1;
+                    node = key.map_node(|key| key[location.map(|v| v >> shift)].clone());
+                    location = location.map(|v| v & ((1 << shift) - 1));
+                }
+                NodeOrLeaf::Leaf(key) => break key[location],
+            }
+        }
+    }
+
+    fn dump_2d(hl: &Simple<LeafData, 2>, node: NodeAndLevel<NodeId<2>>, title: &str) {
+        println!("{}:", title);
+        let size = 2usize << node.level;
+        for y in 0..size {
+            for x in 0..size {
+                match get_leaf(hl, node.clone(), IndexVec([y, x])) {
+                    None => print!("_ "),
+                    Some(leaf) => print!("{} ", leaf),
+                }
+            }
+            println!();
+        }
+    }
+
+    fn dump_1d(hl: &Simple<LeafData, 1>, node: NodeAndLevel<NodeId<1>>, title: &str) {
+        println!("{}:", title);
+        let size = 2usize << node.level;
+        for x in 0..size {
+            match get_leaf(hl, node.clone(), IndexVec([x])) {
+                None => print!("_ "),
+                Some(leaf) => print!("{} ", leaf),
+            }
+        }
+        println!();
+    }
+
+    fn build_with_helper<const DIMENSION: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
+        f: &mut impl FnMut(IndexVec<DIMENSION>) -> Leaf,
+        outer_location: IndexVec<DIMENSION>,
+        level: usize,
+    ) -> NodeAndLevel<NodeId<DIMENSION>>
+    where
+        Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        NodeId<DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        IndexVec<DIMENSION>: IndexVecExt,
+    {
+        if level == 0 {
+            hl.intern_leaf_node(Array::build_array(|index| {
+                f(index + outer_location.map(|v| v * 2))
+            }))
+            .unwrap()
+        } else {
+            let key = Array::build_array(|index| {
+                build_with_helper(hl, f, index + outer_location.map(|v| v * 2), level - 1).node
+            });
+            hl.intern_non_leaf_node(NodeAndLevel {
+                node: key,
+                level: level - 1,
+            })
+            .unwrap()
+        }
+    }
+
+    fn build_with<const DIMENSION: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
+        mut f: impl FnMut(IndexVec<DIMENSION>) -> Leaf,
+        level: usize,
+    ) -> NodeAndLevel<NodeId<DIMENSION>>
+    where
+        Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        NodeId<DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        IndexVec<DIMENSION>: IndexVecExt,
+    {
+        build_with_helper(hl, &mut f, 0usize.into(), level)
+    }
+
+    fn build_2d<const SIZE: usize>(
+        hl: &Simple<LeafData, 2>,
+        array: [[Leaf; SIZE]; SIZE],
+    ) -> NodeAndLevel<NodeId<2>> {
+        assert!(SIZE.is_power_of_two());
+        assert_ne!(SIZE, 1);
+        let log2_size = SIZE.trailing_zeros();
+        let level = log2_size as usize - 1;
+        let array = Array(array);
+        build_with(hl, |index| array[index], level)
+    }
+
+    fn build_1d<const SIZE: usize>(
+        hl: &Simple<LeafData, 1>,
+        array: [Leaf; SIZE],
+    ) -> NodeAndLevel<NodeId<1>> {
+        assert!(SIZE.is_power_of_two());
+        assert_ne!(SIZE, 1);
+        let log2_size = SIZE.trailing_zeros();
+        let level = log2_size as usize - 1;
+        let array = Array(array);
+        build_with(hl, |index| array[index], level)
+    }
+
+    macro_rules! leaf {
+        (_) => {
+            None
+        };
+        ($literal:literal) => {
+            Some($literal)
+        };
+    }
+
+    macro_rules! array_1d {
+        ($($cell:tt),+) => {
+            [$(leaf!($cell),)+]
+        };
+    }
+
+    macro_rules! array_2d {
+        ($([$($cell:tt),+]),+) => {
+            [$([$(leaf!($cell),)+],)+]
+        };
+    }
+
+    #[track_caller]
+    fn test_write<BuildIn, Build, Dump, const DIMENSION: usize, const LINES: usize>(
+        header: MacrocellHeader,
+        array: BuildIn,
+        expected_lines: [&str; LINES],
+        expected_header: MacrocellHeader,
+        build: Build,
+        dump: Dump,
+    ) where
+        Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        NodeId<DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        IndexVec<DIMENSION>: IndexVecExt,
+        Build: FnOnce(&Simple<LeafData, DIMENSION>, BuildIn) -> NodeAndLevel<NodeId<DIMENSION>>,
+        Dump: Fn(&Simple<LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
+    {
+        let hl = Simple::new(LeafData);
+        let node = build(&hl, array);
+        let mut writer = Vec::<u8>::new();
+        MacrocellWriter::with_header(&mut writer, header)
+            .write(&hl, node.clone())
+            .unwrap();
+        let text = String::from_utf8(writer).unwrap();
+        println!("text:");
+        println!("{}", text);
+        let expected_text = expected_lines.join("\n") + "\n";
+        assert_eq!(text, expected_text);
+        let reader = MacrocellReader::new(expected_text.as_bytes()).unwrap();
+        assert_eq!(*reader.header(), expected_header);
+        let read_node = reader.read_body(&hl).unwrap();
+        dump(&hl, read_node.clone(), "read_node");
+        assert_eq!(read_node, node);
+    }
+
+    #[test]
+    fn test1() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _], //
+                [_, _]
+            ],
+            [
+                "[M2] (parallel-hashlife)", //
+                "1 null null null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: None,
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test2() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: Some("".into()),
+                generation: None,
+                rule: None,
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _], //
+                [_, _]
+            ],
+            [
+                "[M2] (parallel-hashlife)", //
+                "#",
+                "1 null null null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: Some("".into()),
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: None,
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test3() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("".into()),
+                generation: None,
+                rule: None,
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _], //
+                [_, _]
+            ],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 2",
+                "#N 1",
+                "#",
+                "1 null null null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("".into()),
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test4() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("".into()),
+                generation: Some("23456".into()),
+                rule: Some("MyRule".into()),
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [0, 1], //
+                [_, _]
+            ],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 2",
+                "#G 23456",
+                "#R MyRule",
+                "#N 1",
+                "#",
+                "1 0 1 null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("".into()),
+                generation: Some("23456".into()),
+                rule: Some("MyRule".into()),
+                dimension: 2,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test5() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("".into()),
+                generation: Some("23456".into()),
+                rule: Some("MyRule".into()),
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _, _, _], //
+                [_, _, _, _],
+                [_, _, _, _],
+                [_, _, _, _]
+            ],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 2",
+                "#G 23456",
+                "#R MyRule",
+                "#N 1",
+                "#",
+                "2 0 0 0 0",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("".into()),
+                generation: Some("23456".into()),
+                rule: Some("MyRule".into()),
+                dimension: 2,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test6() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [0, _, _, _], //
+                [_, _, _, _],
+                [_, _, _, _],
+                [_, _, _, _]
+            ],
+            [
+                "[M2] (parallel-hashlife)",
+                "1 0 null null null",
+                "2 1 0 0 0",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: None,
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test7() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [0, _, _, _], //
+                [_, 1, _, _],
+                [_, _, 1, _],
+                [_, _, _, 1]
+            ],
+            [
+                "[M2] (parallel-hashlife)",
+                "1 0 null null 1",
+                "1 1 null null 1",
+                "2 1 0 0 2",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: None,
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test8() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _, _, _, _, _, _, _],
+                [_, _, _, _, _, _, _, _],
+                [_, _, _, _, _, _, _, _],
+                [_, _, _, _, _, _, _, _],
+                [_, _, _, _, _, _, _, _],
+                [_, _, _, _, _, _, _, _],
+                [_, _, _, _, _, _, _, _],
+                [_, _, _, _, _, _, _, _]
+            ],
+            [
+                "[M3] (parallel-hashlife)", //
+                "#D 2",
+                "#N 1",
+                "3 0 0 0 0",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test9() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _, _, _, _, _, _, _],
+                [_, _, 1, 1, 1, _, _, _],
+                [_, 1, _, _, _, 1, _, _],
+                [1, _, _, _, _, _, 1, _],
+                [1, _, _, _, _, _, 1, _],
+                [1, _, _, _, _, _, 1, _],
+                [_, 1, _, _, _, 1, _, _],
+                [_, _, 1, 1, 1, _, _, _]
+            ],
+            [
+                "[M2] (parallel-hashlife)",
+                "1 null null 1 1",
+                "1 null 1 1 null",
+                "2 0 1 2 0",
+                "1 null null 1 null",
+                "1 null 1 null null",
+                "2 4 0 5 4",
+                "1 1 null 1 null",
+                "2 7 0 5 1",
+                "2 0 7 2 0",
+                "3 3 6 8 9",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: None,
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test10() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1]
+            ],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 2",
+                "#N 3",
+                "1 1 1 1 1",
+                "2 1 1 1 1",
+                "3 2 2 2 2",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: NonZeroUsize::new(3),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test11() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("a\n".into()),
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _], //
+                [_, _]
+            ],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 2",
+                "#N 1",
+                "# a",
+                "1 null null null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("a".into()),
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test12() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("a\n\n\n\nb".into()),
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _], //
+                [_, _]
+            ],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 2",
+                "#N 1",
+                "# a",
+                "#",
+                "#",
+                "#",
+                "# b",
+                "1 null null null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some("a\n\n\n\nb".into()),
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test13() {
+        test_write(
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some(" a".into()),
+                ..MacrocellHeader::default()
+            },
+            array_2d![
+                [_, _], //
+                [_, _]
+            ],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 2",
+                "#N 1",
+                "#  a",
+                "1 null null null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: Some(" a".into()),
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test1d_1() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_1d![_, _],
+            [
+                "[M3] (parallel-hashlife)", //
+                "#D 1",
+                "#N 1",
+                "1 null null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 1,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_1d,
+            dump_1d,
+        );
+    }
+
+    #[test]
+    fn test1d_2() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_1d![0, _],
+            [
+                "[M3] (parallel-hashlife)", //
+                "#D 1",
+                "#N 1",
+                "1 0 null",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 1,
+                node_count: NonZeroUsize::new(1),
+            },
+            build_1d,
+            dump_1d,
+        );
+    }
+
+    #[test]
+    fn test1d_3() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_1d![0, 0, 0, 0],
+            [
+                "[M3] (parallel-hashlife)", //
+                "#D 1",
+                "#N 2",
+                "1 0 0",
+                "2 1 1",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 1,
+                node_count: NonZeroUsize::new(2),
+            },
+            build_1d,
+            dump_1d,
+        );
+    }
+
+    #[test]
+    fn test1d_4() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_1d![0, 0, 0, 0, 0, 0, 0, 0],
+            [
+                "[M3] (parallel-hashlife)", //
+                "#D 1",
+                "#N 3",
+                "1 0 0",
+                "2 1 1",
+                "3 2 2",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 1,
+                node_count: NonZeroUsize::new(3),
+            },
+            build_1d,
+            dump_1d,
+        );
+    }
+
+    #[test]
+    fn test1d_5() {
+        test_write(
+            MacrocellHeader {
+                ..MacrocellHeader::default()
+            },
+            array_1d![0, _, _, 0, _, 0, 0, _],
+            [
+                "[M3] (parallel-hashlife)",
+                "#D 1",
+                "#N 5",
+                "1 0 null",
+                "1 null 0",
+                "2 1 2",
+                "2 2 1",
+                "3 3 4",
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M3,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 1,
+                node_count: NonZeroUsize::new(5),
+            },
+            build_1d,
+            dump_1d,
+        );
     }
 }

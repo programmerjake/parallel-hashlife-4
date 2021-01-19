@@ -6,6 +6,8 @@ use crate::{
 };
 use core::marker::{Send as TheSend, Sync as TheSync};
 
+use super::LeafStep;
+
 #[path = "hashlife_impl.rs"]
 mod hashlife_impl;
 
@@ -37,7 +39,8 @@ where
     }
 }
 
-pub trait Hashlife<'a, const DIMENSION: usize>: HashlifeData<'a, DIMENSION> + Sync
+pub trait Hashlife<'a, const DIMENSION: usize>:
+    HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION> + Sync
 where
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -59,7 +62,7 @@ where
 
 impl<'a, T: ?Sized, const DIMENSION: usize> Hashlife<'a, DIMENSION> for T
 where
-    Self: HashlifeData<'a, DIMENSION>,
+    Self: HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,

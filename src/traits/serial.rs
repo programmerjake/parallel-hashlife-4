@@ -1,7 +1,7 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt},
-    traits::{HasErrorType, HashlifeData},
+    traits::{HasErrorType, HashlifeData, LeafStep},
     NodeAndLevel,
 };
 
@@ -42,7 +42,8 @@ where
     }
 }
 
-pub trait Hashlife<'a, const DIMENSION: usize>: HashlifeData<'a, DIMENSION>
+pub trait Hashlife<'a, const DIMENSION: usize>:
+    HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION>
 where
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -59,7 +60,7 @@ where
 
 impl<'a, T, const DIMENSION: usize> Hashlife<'a, DIMENSION> for T
 where
-    T: HashlifeData<'a, DIMENSION>,
+    T: HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,

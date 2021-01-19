@@ -71,7 +71,7 @@ where
 }
 
 pub trait HashlifeData<'a, const DIMENSION: usize>:
-    HasErrorType + LeafStep<DIMENSION> + HasNodeType<DIMENSION>
+    HasErrorType + HasLeafType<DIMENSION> + HasNodeType<DIMENSION>
 where
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,

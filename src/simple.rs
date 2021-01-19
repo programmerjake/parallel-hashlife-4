@@ -132,7 +132,7 @@ type Node<Leaf, const DIMENSION: usize> =
 
 pub struct Simple<LeafData, const DIMENSION: usize>
 where
-    LeafData: LeafStep<DIMENSION>,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
@@ -143,7 +143,7 @@ where
 
 impl<LeafData, const DIMENSION: usize> Simple<LeafData, DIMENSION>
 where
-    LeafData: LeafStep<DIMENSION>,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
@@ -167,7 +167,7 @@ where
 
 impl<LeafData, const DIMENSION: usize> HasErrorType for Simple<LeafData, DIMENSION>
 where
-    LeafData: LeafStep<DIMENSION>,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
@@ -176,7 +176,7 @@ where
 
 impl<LeafData, const DIMENSION: usize> HasLeafType<DIMENSION> for Simple<LeafData, DIMENSION>
 where
-    LeafData: LeafStep<DIMENSION>,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
@@ -185,7 +185,7 @@ where
 
 impl<LeafData, const DIMENSION: usize> HasNodeType<DIMENSION> for Simple<LeafData, DIMENSION>
 where
-    LeafData: LeafStep<DIMENSION>,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<NodeId<LeafData::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -210,7 +210,7 @@ where
 
 impl<LeafData, const DIMENSION: usize> Simple<LeafData, DIMENSION>
 where
-    LeafData: LeafStep<DIMENSION>,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
@@ -236,7 +236,7 @@ where
 impl<'a, LeafData, const DIMENSION: usize> HashlifeData<'a, DIMENSION>
     for Simple<LeafData, DIMENSION>
 where
-    LeafData: LeafStep<DIMENSION>,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
