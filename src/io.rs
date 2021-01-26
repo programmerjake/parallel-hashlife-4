@@ -303,7 +303,7 @@ impl<R: BufRead> MacrocellReader<R> {
                     let mut x = 0;
                     let mut y = 0;
                     for ch in line.bytes() {
-                        if x >= LEVEL2_SIZE || y >= LEVEL2_SIZE {
+                        if x > LEVEL2_SIZE || y > LEVEL2_SIZE {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "moved out of range parsing 2-state leaf node's children",
@@ -316,9 +316,23 @@ impl<R: BufRead> MacrocellReader<R> {
                                 y += 1;
                             }
                             b'.' => {
+                                if x >= LEVEL2_SIZE || y >= LEVEL2_SIZE {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "moved out of range parsing 2-state leaf node's children",
+                                    )
+                                    .into());
+                                }
                                 x += 1;
                             }
                             b'*' => {
+                                if x >= LEVEL2_SIZE || y >= LEVEL2_SIZE {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "moved out of range parsing 2-state leaf node's children",
+                                    )
+                                    .into());
+                                }
                                 cells[IndexVec([y, x])] = true;
                                 x += 1;
                             }
@@ -866,6 +880,33 @@ mod test {
         assert_eq!(read_node, node);
     }
 
+    #[track_caller]
+    fn test_read<BuildIn, Build, Dump, const DIMENSION: usize, const LINES: usize>(
+        lines: [&str; LINES],
+        expected_array: BuildIn,
+        expected_header: MacrocellHeader,
+        build: Build,
+        dump: Dump,
+    ) where
+        Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        NodeId<DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+        Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+        IndexVec<DIMENSION>: IndexVecExt,
+        Build: FnOnce(&Simple<LeafData, DIMENSION>, BuildIn) -> NodeAndLevel<NodeId<DIMENSION>>,
+        Dump: Fn(&Simple<LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
+    {
+        let hl = Simple::new(LeafData);
+        let text = lines.join("\n") + "\n";
+        let reader = MacrocellReader::new(text.as_bytes()).unwrap();
+        assert_eq!(*reader.header(), expected_header);
+        let read_node = reader.read_body(&hl).unwrap();
+        dump(&hl, read_node.clone(), "read_node");
+        let expected_node = build(&hl, expected_array);
+        dump(&hl, expected_node.clone(), "expected_node");
+        assert_eq!(read_node, expected_node);
+    }
+
     #[test]
     fn test1() {
         test_write(
@@ -1308,6 +1349,104 @@ mod test {
                 rule: None,
                 dimension: 2,
                 node_count: NonZeroUsize::new(1),
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test14() {
+        test_read(
+            [
+                "[M2] (parallel-hashlife)",
+                "..****$.*....*$*.*..*.*$*......*$*.*..*.*$*..**..*$.*....*$..****$",
+            ],
+            array_2d![
+                [_, _, 1, 1, 1, 1, _, _],
+                [_, 1, _, _, _, _, 1, _],
+                [1, _, 1, _, _, 1, _, 1],
+                [1, _, _, _, _, _, _, 1],
+                [1, _, 1, _, _, 1, _, 1],
+                [1, _, _, 1, 1, _, _, 1],
+                [_, 1, _, _, _, _, 1, _],
+                [_, _, 1, 1, 1, 1, _, _]
+            ],
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: None,
+                generation: None,
+                rule: None,
+                dimension: 2,
+                node_count: None,
+            },
+            build_2d,
+            dump_2d,
+        );
+    }
+
+    #[test]
+    fn test15() {
+        #[rustfmt::skip]
+        let expected_array = array_2d![
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, 1, 1, 1, 1, 1, 1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, 1, _, _, _, _, _, 1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, 1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, 1, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, 1, 1, 1, _, 1, 1, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, 1, 1, 1, 1, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, 1, 1, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, 1, 1, 1, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, _, _, _, 1, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, 1, 1, _, _, _, _, _, _, 1, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, 1, 1, 1, 1, _, 1, 1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, 1, 1, 1, 1, 1, 1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, 1, 1, 1, 1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _],
+            [_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _]
+        ];
+        test_read(
+            [
+                "[M2] (golly 2.8)",
+                "#R B3/S23",
+                "$$$$$$.******$*.....*$",
+                "......*$.....*$",
+                "4 0 1 0 2",
+                "$$$$......**$..****.*$...*****$....***$",
+                "$$$$$*$",
+                "4 0 0 4 5",
+                "$$$$$......**$..****.*$..******$",
+                "...****$",
+                "4 0 7 0 8",
+                "$$....****$...*...*$.......*$......*$*$",
+                "4 10 0 0 0",
+                "5 3 6 9 11",
+            ],
+            expected_array,
+            MacrocellHeader {
+                version: MacrocellVersion::M2,
+                comment_lines: None,
+                generation: None,
+                rule: Some("B3/S23".into()),
+                dimension: 2,
+                node_count: None,
             },
             build_2d,
             dump_2d,
