@@ -16,34 +16,34 @@ mod send_sync {
 
 use send_sync::{Everything as TheSend, Everything as TheSync};
 
-trait ParallelBuildArray<T, const LENGTH: usize, const DIMENSION: usize>: HasErrorType
+trait ParallelBuildArray<'a, T, Error, const LENGTH: usize, const DIMENSION: usize>
 where
     T: ArrayRepr<LENGTH, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
 {
-    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Self::Error>>(
-        &self,
+    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Error>>(
+        &'a self,
         f: F,
-    ) -> Result<Array<T, LENGTH, DIMENSION>, Self::Error>;
+    ) -> Result<Array<T, LENGTH, DIMENSION>, Error>;
 }
 
-impl<This, T, const LENGTH: usize, const DIMENSION: usize> ParallelBuildArray<T, LENGTH, DIMENSION>
-    for This
+impl<'a, This, T, Error, const LENGTH: usize, const DIMENSION: usize>
+    ParallelBuildArray<'a, T, Error, LENGTH, DIMENSION> for This
 where
-    This: HasErrorType + ?Sized,
+    This: ?Sized,
     T: ArrayRepr<LENGTH, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
 {
-    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Self::Error>>(
-        &self,
+    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Error>>(
+        &'a self,
         f: F,
-    ) -> Result<Array<T, LENGTH, DIMENSION>, Self::Error> {
+    ) -> Result<Array<T, LENGTH, DIMENSION>, Error> {
         Array::try_build_array(f)
     }
 }
 
 pub trait Hashlife<'a, const DIMENSION: usize>:
-    HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION>
+    HashlifeData<'a, DIMENSION> + LeafStep<'a, DIMENSION>
 where
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -60,7 +60,7 @@ where
 
 impl<'a, T, const DIMENSION: usize> Hashlife<'a, DIMENSION> for T
 where
-    T: HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION>,
+    T: HashlifeData<'a, DIMENSION> + LeafStep<'a, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,

@@ -11,45 +11,58 @@ use super::LeafStep;
 #[path = "hashlife_impl.rs"]
 mod hashlife_impl;
 
-pub trait ParallelBuildArray<T, const LENGTH: usize, const DIMENSION: usize>: HasErrorType
+pub trait ParallelBuildArray<'a, T, Error, const LENGTH: usize, const DIMENSION: usize>
 where
     T: ArrayRepr<LENGTH, DIMENSION> + Send,
     IndexVec<DIMENSION>: IndexVecExt,
-    Self::Error: Send,
+    Error: Send,
 {
-    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Self::Error> + Sync>(
-        &self,
+    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Error> + Sync>(
+        &'a self,
         f: F,
-    ) -> Result<Array<T, LENGTH, DIMENSION>, Self::Error>;
+    ) -> Result<Array<T, LENGTH, DIMENSION>, Error>;
 }
 
-impl<T, This, const LENGTH: usize, const DIMENSION: usize> ParallelBuildArray<T, LENGTH, DIMENSION>
-    for &'_ This
+impl<'b: 'a, 'a, T, Error, This, const LENGTH: usize, const DIMENSION: usize>
+    ParallelBuildArray<'a, T, Error, LENGTH, DIMENSION> for &'b This
 where
-    This: ?Sized + ParallelBuildArray<T, LENGTH, DIMENSION>,
+    This: ?Sized + ParallelBuildArray<'a, T, Error, LENGTH, DIMENSION>,
     T: ArrayRepr<LENGTH, DIMENSION> + Send,
     IndexVec<DIMENSION>: IndexVecExt,
-    Self::Error: Send,
+    Error: Send,
 {
-    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Self::Error> + Sync>(
+    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Error> + Sync>(
         &self,
         f: F,
-    ) -> Result<Array<T, LENGTH, DIMENSION>, Self::Error> {
+    ) -> Result<Array<T, LENGTH, DIMENSION>, Error> {
         (**self).parallel_build_array(f)
     }
 }
 
 pub trait Hashlife<'a, const DIMENSION: usize>:
-    HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION> + Sync
+    HashlifeData<'a, DIMENSION>
+    + LeafStep<'a, DIMENSION>
+    + Sync
+    + ParallelBuildArray<
+        'a,
+        <Self as HasNodeType<'a, DIMENSION>>::NodeId,
+        <Self as HasErrorType>::Error,
+        3,
+        DIMENSION,
+    > + ParallelBuildArray<
+        'a,
+        <Self as HasNodeType<'a, DIMENSION>>::NodeId,
+        <Self as HasErrorType>::Error,
+        2,
+        DIMENSION,
+    >
 where
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Self::Error: Send,
     Self::NodeId: Send + Sync,
     Self::Leaf: Send,
-    Self: ParallelBuildArray<<Self as HasNodeType<DIMENSION>>::NodeId, 3, DIMENSION>,
-    Self: ParallelBuildArray<<Self as HasNodeType<DIMENSION>>::NodeId, 2, DIMENSION>,
+    <Self as HasErrorType>::Error: Send,
 {
     fn recursive_hashlife_compute_node_next(
         &'a self,
@@ -62,15 +75,16 @@ where
 
 impl<'a, T: ?Sized, const DIMENSION: usize> Hashlife<'a, DIMENSION> for T
 where
-    Self: HashlifeData<'a, DIMENSION> + LeafStep<DIMENSION>,
+    Self: HashlifeData<'a, DIMENSION>
+        + LeafStep<'a, DIMENSION>
+        + ParallelBuildArray<'a, <T as HasNodeType<'a, DIMENSION>>::NodeId, Self::Error, 3, DIMENSION>
+        + ParallelBuildArray<'a, <T as HasNodeType<'a, DIMENSION>>::NodeId, Self::Error, 2, DIMENSION>
+        + Sync,
     IndexVec<DIMENSION>: IndexVecExt,
     Array<Self::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<Self::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Self::Error: Send,
     Self::NodeId: Send + Sync,
     Self::Leaf: Send,
-    Self: ParallelBuildArray<<T as HasNodeType<DIMENSION>>::NodeId, 3, DIMENSION>,
-    Self: ParallelBuildArray<<T as HasNodeType<DIMENSION>>::NodeId, 2, DIMENSION>,
-    Self: Sync,
 {
 }

@@ -16,6 +16,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
+use parallel_hash_table::NotEnoughSpace;
 use rayon::iter::{
     plumbing, plumbing::Producer, IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
 };
@@ -100,69 +101,8 @@ impl WaitWake for StdWaitWake {
     }
 }
 
-pub struct RayonParallel<Base: ?Sized>(PhantomData<fn(Base) -> Base>);
-
-impl<Base: ?Sized> Copy for RayonParallel<Base> {}
-
-impl<Base: ?Sized> Clone for RayonParallel<Base> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<Base: ?Sized> PartialEq for RayonParallel<Base> {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
-impl<Base: ?Sized> Eq for RayonParallel<Base> {}
-
-impl<Base: ?Sized> Hash for RayonParallel<Base> {
-    fn hash<H: Hasher>(&self, _state: &mut H) {}
-}
-
-impl<Base: ?Sized> PartialOrd for RayonParallel<Base> {
-    fn partial_cmp(&self, _other: &Self) -> Option<cmp::Ordering> {
-        Some(cmp::Ordering::Equal)
-    }
-}
-
-impl<Base: ?Sized> Ord for RayonParallel<Base> {
-    fn cmp(&self, _other: &Self) -> cmp::Ordering {
-        cmp::Ordering::Equal
-    }
-}
-
-impl<Base: ?Sized> fmt::Debug for RayonParallel<Base> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("RayonParallel").finish()
-    }
-}
-
-impl<Base: ?Sized> Default for RayonParallel<Base> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<Base: HasErrorType + ?Sized> HasErrorType for RayonParallel<Base> {
-    type Error = Base::Error;
-}
-
-impl<T, Base, const LENGTH: usize> ParallelBuildArray<T, LENGTH, 0> for RayonParallel<Base>
-where
-    Base: ?Sized + HasErrorType,
-    T: ArrayRepr<LENGTH, 0, Repr = T> + Send,
-    Self::Error: Send,
-{
-    fn parallel_build_array<F: Fn(IndexVec<0>) -> Result<T, Self::Error> + Sync>(
-        &self,
-        f: F,
-    ) -> Result<Array<T, LENGTH, 0>, Self::Error> {
-        f(IndexVec([])).map(Array)
-    }
-}
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub struct RayonParallel;
 
 #[derive(Clone, Debug)]
 pub struct ParallelIndexes<const ARRAY_LENGTH: usize, const DIMENSION: usize>(
@@ -235,19 +175,18 @@ where
     }
 }
 
-impl<T, Base, const LENGTH: usize, const DIMENSION: usize, const PREV_DIMENSION: usize>
-    ParallelBuildArray<T, LENGTH, DIMENSION> for RayonParallel<Base>
+impl<'a, T, Error, const LENGTH: usize, const DIMENSION: usize>
+    ParallelBuildArray<'a, T, Error, LENGTH, DIMENSION> for RayonParallel
 where
-    Base: ?Sized + HasErrorType,
     T: ArrayRepr<LENGTH, DIMENSION> + Send,
     Option<T>: ArrayRepr<LENGTH, DIMENSION> + Send,
-    IndexVec<DIMENSION>: IndexVecNonzeroDimension<PrevDimension = IndexVec<PREV_DIMENSION>>,
-    Self::Error: Send,
+    IndexVec<DIMENSION>: IndexVecExt,
+    Error: Send,
 {
-    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Self::Error> + Sync>(
-        &self,
+    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Error> + Sync>(
+        &'a self,
         f: F,
-    ) -> Result<Array<T, LENGTH, DIMENSION>, Self::Error> {
+    ) -> Result<Array<T, LENGTH, DIMENSION>, Error> {
         let mut retval = Array::<Option<T>, LENGTH, DIMENSION>::build_array(|_| None);
         struct SyncWrapper<T>(T);
         unsafe impl<T> Sync for SyncWrapper<T> {}
@@ -355,5 +294,13 @@ impl<'a, T: Send + Sync> IntoParallelIterator for parallel_hash_table::IterMut<'
     type Item = parallel_hash_table::EntryMut<'a, T>;
     fn into_par_iter(self) -> Self::Iter {
         ParallelHashTableParIterMut(self)
+    }
+}
+
+impl std::error::Error for NotEnoughSpace {}
+
+impl From<NotEnoughSpace> for std::io::Error {
+    fn from(v: NotEnoughSpace) -> Self {
+        std::io::Error::new(std::io::ErrorKind::Other, v)
     }
 }

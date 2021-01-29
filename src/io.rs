@@ -695,7 +695,7 @@ mod test {
 
     type Leaf = Option<u8>;
 
-    impl<const DIMENSION: usize> HasLeafType<DIMENSION> for LeafData
+    impl<const DIMENSION: usize> HasLeafType<'_, DIMENSION> for LeafData
     where
         Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
         Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -705,8 +705,8 @@ mod test {
 
     type NodeId<const DIMENSION: usize> = crate::simple::NodeId<Leaf, DIMENSION>;
 
-    fn get_leaf<const DIMENSION: usize>(
-        hl: &Simple<LeafData, DIMENSION>,
+    fn get_leaf<'a, const DIMENSION: usize>(
+        hl: &'a Simple<'a, LeafData, DIMENSION>,
         mut node: NodeAndLevel<NodeId<DIMENSION>>,
         mut location: IndexVec<DIMENSION>,
     ) -> Leaf
@@ -729,7 +729,7 @@ mod test {
         }
     }
 
-    fn dump_2d(hl: &Simple<LeafData, 2>, node: NodeAndLevel<NodeId<2>>, title: &str) {
+    fn dump_2d<'a>(hl: &'a Simple<'a, LeafData, 2>, node: NodeAndLevel<NodeId<2>>, title: &str) {
         println!("{}:", title);
         let size = 2usize << node.level;
         for y in 0..size {
@@ -743,7 +743,7 @@ mod test {
         }
     }
 
-    fn dump_1d(hl: &Simple<LeafData, 1>, node: NodeAndLevel<NodeId<1>>, title: &str) {
+    fn dump_1d<'a>(hl: &'a Simple<'a, LeafData, 1>, node: NodeAndLevel<NodeId<1>>, title: &str) {
         println!("{}:", title);
         let size = 2usize << node.level;
         for x in 0..size {
@@ -755,8 +755,8 @@ mod test {
         println!();
     }
 
-    fn build_with_helper<const DIMENSION: usize>(
-        hl: &Simple<LeafData, DIMENSION>,
+    fn build_with_helper<'a, const DIMENSION: usize>(
+        hl: &'a Simple<'a, LeafData, DIMENSION>,
         f: &mut impl FnMut(IndexVec<DIMENSION>) -> Leaf,
         outer_location: IndexVec<DIMENSION>,
         level: usize,
@@ -785,8 +785,8 @@ mod test {
         }
     }
 
-    fn build_with<const DIMENSION: usize>(
-        hl: &Simple<LeafData, DIMENSION>,
+    fn build_with<'a, const DIMENSION: usize>(
+        hl: &'a Simple<'a, LeafData, DIMENSION>,
         mut f: impl FnMut(IndexVec<DIMENSION>) -> Leaf,
         level: usize,
     ) -> NodeAndLevel<NodeId<DIMENSION>>
@@ -800,8 +800,8 @@ mod test {
         build_with_helper(hl, &mut f, 0usize.into(), level)
     }
 
-    fn build_2d<const SIZE: usize>(
-        hl: &Simple<LeafData, 2>,
+    fn build_2d<'a, const SIZE: usize>(
+        hl: &'a Simple<'a, LeafData, 2>,
         array: [[Leaf; SIZE]; SIZE],
     ) -> NodeAndLevel<NodeId<2>> {
         assert!(SIZE.is_power_of_two());
@@ -812,8 +812,8 @@ mod test {
         build_with(hl, |index| array[index], level)
     }
 
-    fn build_1d<const SIZE: usize>(
-        hl: &Simple<LeafData, 1>,
+    fn build_1d<'a, const SIZE: usize>(
+        hl: &'a Simple<'a, LeafData, 1>,
         array: [Leaf; SIZE],
     ) -> NodeAndLevel<NodeId<1>> {
         assert!(SIZE.is_power_of_two());
@@ -859,8 +859,12 @@ mod test {
         NodeId<DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
         Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
         IndexVec<DIMENSION>: IndexVecExt,
-        Build: FnOnce(&Simple<LeafData, DIMENSION>, BuildIn) -> NodeAndLevel<NodeId<DIMENSION>>,
-        Dump: Fn(&Simple<LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
+        Build: for<'a> FnOnce(
+            &'a Simple<'a, LeafData, DIMENSION>,
+            BuildIn,
+        ) -> NodeAndLevel<NodeId<DIMENSION>>,
+        Dump:
+            for<'a> Fn(&'a Simple<'a, LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
     {
         let hl = Simple::new(LeafData);
         let node = build(&hl, array);
@@ -893,8 +897,12 @@ mod test {
         NodeId<DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
         Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
         IndexVec<DIMENSION>: IndexVecExt,
-        Build: FnOnce(&Simple<LeafData, DIMENSION>, BuildIn) -> NodeAndLevel<NodeId<DIMENSION>>,
-        Dump: Fn(&Simple<LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
+        Build: for<'a> FnOnce(
+            &'a Simple<'a, LeafData, DIMENSION>,
+            BuildIn,
+        ) -> NodeAndLevel<NodeId<DIMENSION>>,
+        Dump:
+            for<'a> Fn(&'a Simple<'a, LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
     {
         let hl = Simple::new(LeafData);
         let text = lines.join("\n") + "\n";

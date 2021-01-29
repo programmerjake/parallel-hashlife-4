@@ -1,46 +1,15 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::{
-    cell::UnsafeCell,
-    fmt,
-    hint::spin_loop,
-    iter,
+    cell::{Cell, UnsafeCell},
+    fmt, iter,
     iter::FusedIterator,
     marker::PhantomData,
     mem,
     mem::MaybeUninit,
-    num::NonZeroUsize,
     ops::{Deref, Range},
     ptr::NonNull,
     slice,
-    sync::atomic::{AtomicU32, Ordering},
 };
-
-pub use crate::serial_hash_table::NotEnoughSpace;
-
-pub trait WaitWake {
-    /// Does the following steps:
-    /// 1. Lock the mutex associated with key `key`.
-    /// 2. If `should_cancel()` returns `true`, unlock the mutex and return without blocking.
-    /// 3. Atomically unlock the mutex and wait for wake-ups associated with key `key`.
-    /// It is valid for `wait` to stop waiting even without any associated wake-ups.
-    /// # Safety
-    /// `key` must be a memory address controlled by the caller.
-    /// `should_cancel` must not call `wait` or `wake_all` and must not panic.
-    unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC);
-    /// wake all waiting threads that have the key `key`
-    /// # Safety
-    /// `key` must be a memory address controlled by the caller
-    unsafe fn wake_all(&self, key: NonZeroUsize);
-}
-
-impl<T: WaitWake> WaitWake for &'_ T {
-    unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
-        (**self).wait(key, should_cancel);
-    }
-    unsafe fn wake_all(&self, key: NonZeroUsize) {
-        (**self).wake_all(key);
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(transparent)]
@@ -49,8 +18,7 @@ struct State(u32);
 impl State {
     const EMPTY: Self = Self(0);
     const LOCKED: Self = Self(1);
-    const LOCKED_WAITERS: Self = Self(2);
-    const FIRST_FULL: Self = Self(3);
+    const FIRST_FULL: Self = Self(2);
     const fn is_empty(self) -> bool {
         self.0 == Self::EMPTY.0
     }
@@ -72,96 +40,49 @@ impl State {
 
 #[derive(Debug)]
 #[repr(transparent)]
-struct AtomicState(AtomicU32);
+struct CellState(Cell<State>);
 
-impl AtomicState {
+impl CellState {
     const fn new(s: State) -> Self {
-        AtomicState(AtomicU32::new(s.0))
+        CellState(Cell::new(s))
     }
-    fn load(&self, order: Ordering) -> State {
-        State(self.0.load(order))
+    fn load(&self) -> State {
+        self.0.get()
     }
     fn into_inner(self) -> State {
-        State(self.0.into_inner())
+        self.0.into_inner()
     }
     fn get_mut(&mut self) -> &mut State {
-        unsafe { mem::transmute(self.0.get_mut()) }
+        self.0.get_mut()
     }
-    fn compare_exchange_weak(
-        &self,
-        current: State,
-        new: State,
-        success: Ordering,
-        failure: Ordering,
-    ) -> Result<State, State> {
-        match self
-            .0
-            .compare_exchange_weak(current.0, new.0, success, failure)
-        {
-            Ok(v) => Ok(State(v)),
-            Err(v) => Err(State(v)),
-        }
+    fn swap(&self, new: State) -> State {
+        self.0.replace(new)
     }
-    fn swap(&self, new: State, order: Ordering) -> State {
-        State(self.0.swap(new.0, order))
-    }
-    unsafe fn write_start<W: WaitWake>(&self, wait_waker: &W) -> Result<(), State> {
-        let mut spin_count = 0;
-        let mut state = self.load(Ordering::Acquire);
-        loop {
-            if state.is_full() {
-                return Err(state);
-            }
-            if !state.is_empty() && spin_count < 32 {
-                spin_count += 1;
-                state = self.load(Ordering::Acquire);
-                spin_loop();
-                continue;
-            }
-            if let Err(v) = self.compare_exchange_weak(
-                state,
-                if state.is_empty() {
-                    State::LOCKED
-                } else {
-                    State::LOCKED_WAITERS
-                },
-                Ordering::Acquire,
-                Ordering::Acquire,
-            ) {
-                state = v;
-                spin_loop();
-                continue;
-            }
-            if state.is_empty() {
-                return Ok(());
-            }
-            wait_waker.wait(
-                NonZeroUsize::new_unchecked(self as *const _ as usize),
-                || self.load(Ordering::Acquire) != State::LOCKED_WAITERS,
+    fn write_start(&self) -> Result<(), State> {
+        let state = self.load();
+        if state.is_full() {
+            return Err(state);
+        } else {
+            assert!(
+                self.swap(State::LOCKED).is_empty(),
+                "attempt to lock already locked SerialHashTable entry"
             );
+            Ok(())
         }
     }
-    unsafe fn write_cancel<W: WaitWake>(&self, wait_waker: &W) {
-        let state = self.swap(State::EMPTY, Ordering::Release);
-        if state == State::LOCKED_WAITERS {
-            wait_waker.wake_all(NonZeroUsize::new_unchecked(self as *const _ as usize));
-        } else {
-            debug_assert_eq!(state, State::LOCKED);
-        }
+    fn write_cancel(&self) {
+        let state = self.swap(State::EMPTY);
+        debug_assert_eq!(state, State::LOCKED);
     }
-    unsafe fn write_finish<W: WaitWake>(&self, wait_waker: &W, hash: u64) {
-        let state = self.swap(State::make_full(hash), Ordering::Release);
-        if state == State::LOCKED_WAITERS {
-            wait_waker.wake_all(NonZeroUsize::new_unchecked(self as *const _ as usize));
-        } else {
-            debug_assert_eq!(state, State::LOCKED);
-        }
+    fn write_finish(&self, hash: u64) {
+        let state = self.swap(State::make_full(hash));
+        debug_assert_eq!(state, State::LOCKED);
     }
 }
 
 /// use separate non-generic struct to work around drop check
 struct HashTableStorage {
-    states: Box<[AtomicState]>,
+    states: Box<[CellState]>,
     /// really a `Box<[UnsafeCell<MaybeUninit<T>>]>` with the same length as `self.states`
     values: NonNull<()>,
     drop_fn: unsafe fn(&mut Self),
@@ -178,13 +99,13 @@ impl Drop for HashTableStorage {
 impl HashTableStorage {
     unsafe fn drop_fn<T>(&mut self) {
         let (states, values) = self.take::<T>();
-        // safety: must work correctly when self.states and self.values are left empty by `ParallelHashTable::into_iter()`
+        // safety: must work correctly when self.states and self.values are left empty by `SerialHashTable::into_iter()`
         mem::drop(IntoIter {
             states: states.into_vec().into_iter().enumerate(),
             values,
         });
     }
-    fn new<T>(states: Box<[AtomicState]>, values: Box<[UnsafeCell<MaybeUninit<T>>]>) -> Self {
+    fn new<T>(states: Box<[CellState]>, values: Box<[UnsafeCell<MaybeUninit<T>>]>) -> Self {
         assert_eq!(states.len(), values.len());
         unsafe {
             Self {
@@ -194,7 +115,7 @@ impl HashTableStorage {
             }
         }
     }
-    unsafe fn take<T>(&mut self) -> (Box<[AtomicState]>, Box<[UnsafeCell<MaybeUninit<T>>]>) {
+    unsafe fn take<T>(&mut self) -> (Box<[CellState]>, Box<[UnsafeCell<MaybeUninit<T>>]>) {
         let states = mem::replace(&mut self.states, Box::new([]));
         let replacement_values = NonNull::new_unchecked(
             Box::<[UnsafeCell<MaybeUninit<T>>]>::into_raw(Box::new([])) as *mut (),
@@ -214,7 +135,7 @@ impl HashTableStorage {
     }
     unsafe fn states_values_mut<T>(
         &mut self,
-    ) -> (&mut [AtomicState], &mut [UnsafeCell<MaybeUninit<T>>]) {
+    ) -> (&mut [CellState], &mut [UnsafeCell<MaybeUninit<T>>]) {
         let values = slice::from_raw_parts_mut(
             self.values.as_ptr() as *mut UnsafeCell<MaybeUninit<T>>,
             self.states.len(),
@@ -223,24 +144,20 @@ impl HashTableStorage {
     }
 }
 
-pub struct ParallelHashTable<T, W> {
+pub struct SerialHashTable<T> {
     storage: HashTableStorage,
     _phantom: PhantomData<T>,
-    wait_waker: W,
     probe_distance: usize,
 }
 
-unsafe impl<T: Sync + Send, W: Sync + Send> Sync for ParallelHashTable<T, W> {}
-unsafe impl<T: Sync + Send, W: Sync + Send> Send for ParallelHashTable<T, W> {}
-
-impl<T, W> ParallelHashTable<T, W> {
-    pub fn new(log2_capacity: u32, wait_waker: W) -> Self {
+impl<T> SerialHashTable<T> {
+    pub fn new(log2_capacity: u32) -> Self {
         let capacity = 1isize
             .checked_shl(log2_capacity)
             .expect("capacity is too big") as usize;
-        Self::with_probe_distance(log2_capacity, wait_waker, capacity.min(16))
+        Self::with_probe_distance(log2_capacity, capacity.min(16))
     }
-    pub fn with_probe_distance(log2_capacity: u32, wait_waker: W, probe_distance: usize) -> Self {
+    pub fn with_probe_distance(log2_capacity: u32, probe_distance: usize) -> Self {
         let capacity = 1isize
             .checked_shl(log2_capacity)
             .expect("capacity is too big") as usize;
@@ -248,11 +165,10 @@ impl<T, W> ParallelHashTable<T, W> {
         let mut values = Vec::with_capacity(capacity);
         values.resize_with(capacity, || UnsafeCell::new(MaybeUninit::uninit()));
         let mut states = Vec::with_capacity(capacity);
-        states.resize_with(capacity, || AtomicState::new(State::EMPTY));
+        states.resize_with(capacity, || CellState::new(State::EMPTY));
         Self {
             storage: HashTableStorage::new::<T>(states.into(), values.into()),
             _phantom: PhantomData,
-            wait_waker,
             probe_distance,
         }
     }
@@ -268,62 +184,63 @@ impl<T, W> ParallelHashTable<T, W> {
     pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T> {
         self.into_iter()
     }
-    pub fn wait_waker(&self) -> &W {
-        &self.wait_waker
-    }
-    pub fn wait_waker_mut(&mut self) -> &mut W {
-        &mut self.wait_waker
-    }
 }
 
-impl<T: fmt::Debug, W> fmt::Debug for ParallelHashTable<T, W> {
+impl<T: fmt::Debug> fmt::Debug for SerialHashTable<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(self.iter()).finish()
     }
 }
 
-pub struct LockedEntry<'a, T, W: WaitWake> {
-    state: &'a AtomicState,
-    value: &'a UnsafeCell<MaybeUninit<T>>,
-    hash: u64,
-    wait_waker: &'a W,
+#[derive(Clone, Debug)]
+pub struct NotEnoughSpace;
+
+impl fmt::Display for NotEnoughSpace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "not enough space left in hash_table")
+    }
 }
 
-impl<'a, T, W: WaitWake> LockedEntry<'a, T, W> {
+pub struct LockedEntry<'a, T> {
+    state: &'a CellState,
+    value: &'a UnsafeCell<MaybeUninit<T>>,
+    hash: u64,
+}
+
+impl<'a, T> LockedEntry<'a, T> {
     pub fn fill(self, value: T) -> &'a T {
         let state = self.state;
         let value_cell = self.value;
         let hash = self.hash;
-        let wait_waker = self.wait_waker;
         mem::forget(self);
         unsafe {
             value_cell.get().write(MaybeUninit::new(value));
-            state.write_finish(wait_waker, hash);
+            state.write_finish(hash);
             &*(value_cell.get() as *const T)
         }
     }
 }
 
-impl<T, W: WaitWake> Drop for LockedEntry<'_, T, W> {
+impl<T> Drop for LockedEntry<'_, T> {
     fn drop(&mut self) {
-        unsafe { self.state.write_cancel(self.wait_waker) }
+        self.state.write_cancel();
     }
 }
 
-pub enum LockResult<'a, T, W: WaitWake> {
-    Vacant(LockedEntry<'a, T, W>),
+pub enum LockResult<'a, T> {
+    Vacant(LockedEntry<'a, T>),
     Full(&'a T),
 }
 
 struct ProbeSequence<'a, T> {
     index: usize,
     mask: usize,
-    states: &'a [AtomicState],
+    states: &'a [CellState],
     values: &'a [UnsafeCell<MaybeUninit<T>>],
 }
 
 impl<'a, T> Iterator for ProbeSequence<'a, T> {
-    type Item = (&'a AtomicState, &'a UnsafeCell<MaybeUninit<T>>);
+    type Item = (&'a CellState, &'a UnsafeCell<MaybeUninit<T>>);
     fn next(&mut self) -> Option<Self::Item> {
         let index = self.index & self.mask;
         self.index += 1;
@@ -331,7 +248,7 @@ impl<'a, T> Iterator for ProbeSequence<'a, T> {
     }
 }
 
-impl<T, W> ParallelHashTable<T, W> {
+impl<T> SerialHashTable<T> {
     fn probe_sequence<'a>(&'a self, hash: u64) -> iter::Take<ProbeSequence<'a, T>> {
         debug_assert!(self.capacity().is_power_of_two());
         let mask = self.capacity() - 1;
@@ -345,7 +262,7 @@ impl<T, W> ParallelHashTable<T, W> {
     }
 }
 
-impl<T, W: WaitWake> ParallelHashTable<T, W> {
+impl<T> SerialHashTable<T> {
     pub fn find<'a, F: FnMut(&'a T) -> bool>(
         &'a self,
         hash: u64,
@@ -354,7 +271,7 @@ impl<T, W: WaitWake> ParallelHashTable<T, W> {
         let expected = State::make_full(hash);
         for (state, value) in self.probe_sequence(hash) {
             unsafe {
-                let state = state.load(Ordering::Acquire);
+                let state = state.load();
                 if state == expected {
                     let value = &*(value.get() as *const T);
                     if entry_eq(value) {
@@ -371,18 +288,13 @@ impl<T, W: WaitWake> ParallelHashTable<T, W> {
         &'a self,
         hash: u64,
         mut entry_eq: F,
-    ) -> Result<LockResult<'a, T, W>, NotEnoughSpace> {
+    ) -> Result<LockResult<'a, T>, NotEnoughSpace> {
         let expected = State::make_full(hash);
         for (state, value) in self.probe_sequence(hash) {
             unsafe {
-                match state.write_start(&self.wait_waker) {
+                match state.write_start() {
                     Ok(()) => {
-                        return Ok(LockResult::Vacant(LockedEntry {
-                            state,
-                            value,
-                            hash,
-                            wait_waker: &self.wait_waker,
-                        }));
+                        return Ok(LockResult::Vacant(LockedEntry { state, value, hash }));
                     }
                     Err(state) => {
                         if state == expected {
@@ -400,12 +312,9 @@ impl<T, W: WaitWake> ParallelHashTable<T, W> {
 }
 
 pub struct IntoIter<T> {
-    states: iter::Enumerate<vec::IntoIter<AtomicState>>,
+    states: iter::Enumerate<vec::IntoIter<CellState>>,
     values: Box<[UnsafeCell<MaybeUninit<T>>]>,
 }
-
-unsafe impl<T: Sync + Send> Sync for IntoIter<T> {}
-unsafe impl<T: Sync + Send> Send for IntoIter<T> {}
 
 impl<T> Drop for IntoIter<T> {
     fn drop(&mut self) {
@@ -445,7 +354,7 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
     }
 }
 
-impl<T, H> IntoIterator for ParallelHashTable<T, H> {
+impl<T> IntoIterator for SerialHashTable<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
     fn into_iter(mut self) -> Self::IntoIter {
@@ -459,7 +368,7 @@ impl<T, H> IntoIterator for ParallelHashTable<T, H> {
 }
 
 pub struct Iter<'a, T> {
-    states: iter::Enumerate<slice::Iter<'a, AtomicState>>,
+    states: iter::Enumerate<slice::Iter<'a, CellState>>,
     values: &'a [UnsafeCell<MaybeUninit<T>>],
 }
 
@@ -511,15 +420,12 @@ impl<'a, T> Clone for Iter<'a, T> {
     }
 }
 
-unsafe impl<T: Sync + Send> Sync for Iter<'_, T> {}
-unsafe impl<T: Sync + Send> Send for Iter<'_, T> {}
-
 impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((index, state)) = self.states.next() {
             unsafe {
-                if state.load(Ordering::Acquire).is_full() {
+                if state.load().is_full() {
                     return Some(&*(self.values[index].get() as *const T));
                 }
             }
@@ -537,7 +443,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         while let Some((index, state)) = self.states.next_back() {
             unsafe {
-                if state.load(Ordering::Acquire).is_full() {
+                if state.load().is_full() {
                     return Some(&*(self.values[index].get() as *const T));
                 }
             }
@@ -546,7 +452,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T, H> IntoIterator for &'a ParallelHashTable<T, H> {
+impl<'a, T> IntoIterator for &'a SerialHashTable<T> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -558,16 +464,13 @@ impl<'a, T, H> IntoIterator for &'a ParallelHashTable<T, H> {
 }
 
 pub struct EntryMut<'a, T> {
-    state: &'a mut AtomicState,
+    state: &'a mut CellState,
     value: &'a UnsafeCell<MaybeUninit<T>>,
 }
 
-unsafe impl<T: Sync + Send> Sync for EntryMut<'_, T> {}
-unsafe impl<T: Sync + Send> Send for EntryMut<'_, T> {}
-
 impl<'a, T> EntryMut<'a, T> {
     pub fn remove(self) -> T {
-        *self.state = AtomicState::new(State::EMPTY);
+        *self.state = CellState::new(State::EMPTY);
         unsafe { self.value.get().read().assume_init() }
     }
 }
@@ -581,7 +484,7 @@ impl<'a, T> Deref for EntryMut<'a, T> {
 
 pub struct IterMut<'a, T> {
     range: Range<usize>,
-    states: *mut AtomicState,
+    states: *mut CellState,
     values: &'a [UnsafeCell<MaybeUninit<T>>],
 }
 
@@ -597,9 +500,6 @@ impl<'a, T> IterMut<'a, T> {
         )
     }
 }
-
-unsafe impl<T: Sync + Send> Sync for IterMut<'_, T> {}
-unsafe impl<T: Sync + Send> Send for IterMut<'_, T> {}
 
 impl<'a, T> Iterator for IterMut<'a, T> {
     type Item = EntryMut<'a, T>;
@@ -637,7 +537,7 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
     }
 }
 
-impl<'a, T, H> IntoIterator for &'a mut ParallelHashTable<T, H> {
+impl<'a, T> IntoIterator for &'a mut SerialHashTable<T> {
     type Item = EntryMut<'a, T>;
     type IntoIter = IterMut<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -652,35 +552,15 @@ impl<'a, T, H> IntoIterator for &'a mut ParallelHashTable<T, H> {
 
 #[cfg(test)]
 mod test {
-    use super::{LockResult, ParallelHashTable, WaitWake};
-    use crate::std_support::StdWaitWake;
-    use alloc::{sync::Arc, vec::Vec};
+    use super::{LockResult, SerialHashTable};
+    use alloc::vec::Vec;
     use core::{
-        cell::{Cell, RefCell},
+        cell::RefCell,
         hash::{BuildHasher, Hash, Hasher},
-        marker::PhantomData,
         mem,
-        num::NonZeroUsize,
         sync::atomic::{AtomicU8, AtomicUsize, Ordering},
     };
-    use hashbrown::{hash_map::DefaultHashBuilder, HashMap, HashSet};
-    use std::{
-        sync::{
-            mpsc::{sync_channel, Receiver},
-            Condvar, Mutex,
-        },
-        thread,
-    };
-
-    #[derive(Clone, Copy, Default, Debug)]
-    struct SingleThreadedWaitWake(PhantomData<*mut ()>);
-
-    impl WaitWake for SingleThreadedWaitWake {
-        unsafe fn wait<SC: FnOnce() -> bool>(&self, _key: NonZeroUsize, should_cancel: SC) {
-            should_cancel();
-        }
-        unsafe fn wake_all(&self, _key: NonZeroUsize) {}
-    }
+    use hashbrown::{hash_map::DefaultHashBuilder, HashSet};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Entry {
@@ -723,8 +603,7 @@ mod test {
 
     #[test]
     fn arena_test() {
-        let ht: ParallelHashTable<EntryWithLifetime<'_>, SingleThreadedWaitWake> =
-            ParallelHashTable::new(2, Default::default());
+        let ht: SerialHashTable<EntryWithLifetime<'_>> = SerialHashTable::new(2);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &EntryWithLifetime<'_>| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -766,8 +645,7 @@ mod test {
     fn drop_test() {
         let item1_count = AtomicUsize::new(0);
         let item2_count = AtomicUsize::new(0);
-        let ht: ParallelHashTable<(Entry, DropTestHelper<'_>), SingleThreadedWaitWake> =
-            ParallelHashTable::new(6, Default::default());
+        let ht: SerialHashTable<(Entry, DropTestHelper<'_>)> = SerialHashTable::new(6);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &Entry| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -799,8 +677,7 @@ mod test {
 
     #[test]
     fn test1() {
-        let mut ht: ParallelHashTable<Entry, SingleThreadedWaitWake> =
-            ParallelHashTable::new(6, Default::default());
+        let mut ht: SerialHashTable<Entry> = SerialHashTable::new(6);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &Entry| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -848,183 +725,5 @@ mod test {
         let entries: Vec<Entry> = ht.iter().cloned().collect();
         let entries2: Vec<Entry> = ht.into_iter().collect();
         assert_eq!(entries, entries2);
-    }
-
-    #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
-    struct ThreadIndex(u32);
-
-    std::thread_local! {
-        static THREAD_INDEX: Cell<Option<ThreadIndex>> = Cell::new(None);
-    }
-
-    struct WaitWakeTracker<W> {
-        wait_set: Mutex<HashMap<ThreadIndex, NonZeroUsize>>,
-        wait_set_changed: Condvar,
-        inner_wait_wake: W,
-    }
-
-    impl<W> WaitWakeTracker<W> {
-        fn new(inner_wait_wake: W) -> Self {
-            Self {
-                wait_set: Mutex::new(HashMap::new()),
-                wait_set_changed: Condvar::new(),
-                inner_wait_wake,
-            }
-        }
-    }
-
-    impl<W: WaitWake> WaitWake for WaitWakeTracker<W> {
-        unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
-            THREAD_INDEX.with(|thread_index| {
-                let mut lock = self.wait_set.lock().unwrap();
-                lock.insert(thread_index.get().unwrap(), key);
-                self.wait_set_changed.notify_all();
-            });
-            self.inner_wait_wake.wait(key, should_cancel);
-            THREAD_INDEX.with(|thread_index| {
-                let mut lock = self.wait_set.lock().unwrap();
-                lock.remove(&thread_index.get().unwrap());
-                self.wait_set_changed.notify_all();
-            });
-        }
-
-        unsafe fn wake_all(&self, key: NonZeroUsize) {
-            self.inner_wait_wake.wake_all(key);
-        }
-    }
-
-    #[test]
-    fn lock_test() {
-        enum Op {
-            InsertIntoEmpty(Entry),
-            AttemptInsertIntoFull(Entry),
-            LockEntry(Entry),
-            CancelLock,
-            FillLock,
-            Finish,
-            Sync,
-        }
-        let ht = Arc::new(ParallelHashTable::new(8, WaitWakeTracker::new(StdWaitWake)));
-        let hasher = DefaultHashBuilder::new();
-        let hasher = move |entry: &Entry| -> u64 {
-            let mut hasher = hasher.build_hasher();
-            entry.hash(&mut hasher);
-            hasher.finish()
-        };
-        let thread_fn = {
-            let ht = ht.clone();
-            let hasher = hasher.clone();
-            move |thread_index, op_channel: Receiver<Op>| {
-                THREAD_INDEX.with(|v| v.set(Some(thread_index)));
-                loop {
-                    match op_channel.recv().unwrap() {
-                        Op::Sync => {}
-                        Op::InsertIntoEmpty(entry) => {
-                            match ht.lock_entry(hasher(&entry), |v| *v == entry).unwrap() {
-                                LockResult::Vacant(lock) => lock.fill(entry),
-                                LockResult::Full(_) => {
-                                    panic!("failed to lock already full entry: {:?}", entry);
-                                }
-                            };
-                        }
-                        Op::AttemptInsertIntoFull(entry) => {
-                            match ht.lock_entry(hasher(&entry), |v| *v == entry).unwrap() {
-                                LockResult::Vacant(_) => panic!("expected full entry: {:?}", entry),
-                                LockResult::Full(v) => assert_eq!(v, &entry),
-                            };
-                        }
-                        Op::LockEntry(entry) => {
-                            let lock = match ht.lock_entry(hasher(&entry), |v| *v == entry).unwrap()
-                            {
-                                LockResult::Vacant(lock) => lock,
-                                LockResult::Full(_) => {
-                                    panic!("failed to lock already full entry: {:?}", entry);
-                                }
-                            };
-                            loop {
-                                match op_channel.recv().unwrap() {
-                                    Op::Sync => {}
-                                    Op::CancelLock => break,
-                                    Op::FillLock => {
-                                        lock.fill(entry);
-                                        break;
-                                    }
-                                    Op::InsertIntoEmpty(_)
-                                    | Op::AttemptInsertIntoFull(_)
-                                    | Op::LockEntry(_)
-                                    | Op::Finish => panic!("locked"),
-                                }
-                            }
-                        }
-                        Op::CancelLock | Op::FillLock => panic!("not locked"),
-                        Op::Finish => break,
-                    }
-                }
-            }
-        };
-        const THREAD_COUNT: u32 = 3;
-        let threads: Vec<_> = (0..THREAD_COUNT)
-            .map(|i| {
-                let f = thread_fn.clone();
-                let (sender, receiver) = sync_channel(0);
-                (thread::spawn(move || f(ThreadIndex(i), receiver)), sender)
-            })
-            .collect();
-        let send_op = |thread_index: usize, op| threads[thread_index].1.send(op).unwrap();
-        let assert_contents = |expected: &[&Entry]| {
-            let expected: HashSet<_> = expected.iter().copied().collect();
-            let actual: HashSet<_> = ht.iter().collect();
-            assert_eq!(expected, actual);
-        };
-        let wait_for_thread_to_wait = |thread_index: u32| {
-            let wait_waker = ht.wait_waker();
-            let _ = ht
-                .wait_waker()
-                .wait_set_changed
-                .wait_while(wait_waker.wait_set.lock().unwrap(), |v| {
-                    !v.contains_key(&ThreadIndex(thread_index))
-                })
-                .unwrap();
-        };
-        let assert_find =
-            |entry, expected| assert_eq!(ht.find(hasher(entry), |v| v == entry), expected);
-        let entry1 = Entry::new();
-        send_op(0, Op::InsertIntoEmpty(entry1.clone()));
-        send_op(0, Op::Sync);
-        assert_contents(&[&entry1]);
-        assert_find(&entry1, Some(&entry1));
-        let entry2 = Entry::new();
-        assert_find(&entry2, None);
-        send_op(0, Op::LockEntry(entry2.clone()));
-        send_op(0, Op::Sync);
-        assert_find(&entry2, None);
-        send_op(1, Op::InsertIntoEmpty(entry2.clone()));
-        wait_for_thread_to_wait(1);
-        assert_contents(&[&entry1]);
-        assert_find(&entry2, None);
-        send_op(0, Op::CancelLock);
-        send_op(1, Op::Sync);
-        assert_contents(&[&entry1, &entry2]);
-        assert_find(&entry2, Some(&entry2));
-        let entry3 = Entry::new();
-        send_op(0, Op::LockEntry(entry3.clone()));
-        send_op(0, Op::Sync);
-        assert_find(&entry3, None);
-        send_op(1, Op::AttemptInsertIntoFull(entry3.clone()));
-        send_op(2, Op::AttemptInsertIntoFull(entry3.clone()));
-        wait_for_thread_to_wait(1);
-        wait_for_thread_to_wait(2);
-        assert_find(&entry3, None);
-        assert_contents(&[&entry1, &entry2]);
-        send_op(0, Op::FillLock);
-        send_op(1, Op::Sync);
-        send_op(2, Op::Sync);
-        assert_find(&entry3, Some(&entry3));
-        assert_contents(&[&entry1, &entry2, &entry3]);
-        threads.into_iter().for_each(|(join_handle, sender)| {
-            sender.send(Op::Finish).unwrap();
-            mem::drop(sender);
-            join_handle.join().unwrap();
-        });
     }
 }

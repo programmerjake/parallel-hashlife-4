@@ -1,4 +1,5 @@
 #![no_std]
+#![deny(elided_lifetimes_in_paths)]
 
 extern crate alloc;
 #[cfg(any(test, feature = "std"))]
@@ -11,9 +12,13 @@ pub mod index_vec;
 pub mod io;
 pub mod parallel;
 pub mod parallel_hash_table;
+pub mod serial;
+pub mod serial_hash_table;
 pub mod simple;
 #[cfg(any(test, feature = "std"))]
 pub mod std_support;
+#[cfg(test)]
+pub mod testing;
 pub mod traits;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

@@ -1,11 +1,8 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt, IndexVecForEach},
-    parallel_hash_table::{self, LockResult, ParallelHashTable, WaitWake},
-    traits::{
-        parallel::ParallelBuildArray, HasErrorType, HasLeafType, HasNodeType, HashlifeData,
-        LeafStep,
-    },
+    serial_hash_table::{self, LockResult, SerialHashTable},
+    traits::{HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep},
     NodeAndLevel, NodeOrLeaf,
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -154,21 +151,19 @@ where
     }
 }
 
-pub struct Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize>
+pub struct Serial<'a, LeafStepT, const DIMENSION: usize>
 where
     LeafStepT: HasLeafType<'a, DIMENSION>,
     NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
-    hash_table: ParallelHashTable<Node<'a, LeafStepT::Leaf, DIMENSION>, WaitWakeT>,
+    hash_table: SerialHashTable<Node<'a, LeafStepT::Leaf, DIMENSION>>,
     hasher: DefaultHashBuilder,
     empty_nodes: Box<[AtomicCell<Option<NodeId<'a, LeafStepT::Leaf, DIMENSION>>>; LEVEL_COUNT]>,
     leaf_step: LeafStepT,
-    array_builder: ArrayBuilder,
 }
 
-impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize>
-    Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
+impl<'a, LeafStepT, const DIMENSION: usize> Serial<'a, LeafStepT, DIMENSION>
 where
     LeafStepT: HasLeafType<'a, DIMENSION>,
     NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -176,8 +171,7 @@ where
 {
     fn from_hash_table(
         leaf_step: LeafStepT,
-        array_builder: ArrayBuilder,
-        hash_table: ParallelHashTable<Node<'a, LeafStepT::Leaf, DIMENSION>, WaitWakeT>,
+        hash_table: SerialHashTable<Node<'a, LeafStepT::Leaf, DIMENSION>>,
     ) -> Self {
         let mut empty_nodes = Vec::with_capacity(LEVEL_COUNT);
         empty_nodes.resize_with(LEVEL_COUNT, || AtomicCell::new(None));
@@ -186,32 +180,19 @@ where
             hasher: DefaultHashBuilder::new(),
             empty_nodes: empty_nodes.into_boxed_slice().try_into().ok().unwrap(),
             leaf_step,
-            array_builder,
         }
     }
-    pub fn new(
-        leaf_step: LeafStepT,
-        array_builder: ArrayBuilder,
-        log2_capacity: u32,
-        wait_waker: WaitWakeT,
-    ) -> Self {
-        Self::from_hash_table(
-            leaf_step,
-            array_builder,
-            ParallelHashTable::new(log2_capacity, wait_waker),
-        )
+    pub fn new(leaf_step: LeafStepT, log2_capacity: u32) -> Self {
+        Self::from_hash_table(leaf_step, SerialHashTable::new(log2_capacity))
     }
     pub fn with_probe_distance(
         leaf_step: LeafStepT,
-        array_builder: ArrayBuilder,
         log2_capacity: u32,
-        wait_waker: WaitWakeT,
         probe_distance: usize,
     ) -> Self {
         Self::from_hash_table(
             leaf_step,
-            array_builder,
-            ParallelHashTable::with_probe_distance(log2_capacity, wait_waker, probe_distance),
+            SerialHashTable::with_probe_distance(log2_capacity, probe_distance),
         )
     }
     pub fn capacity(&self) -> usize {
@@ -226,16 +207,10 @@ where
     pub fn leaf_step_mut(&mut self) -> &mut LeafStepT {
         &mut self.leaf_step
     }
-    pub fn array_builder(&self) -> &ArrayBuilder {
-        &self.array_builder
-    }
-    pub fn array_builder_mut(&mut self) -> &mut ArrayBuilder {
-        &mut self.array_builder
-    }
 }
 
-impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HasNodeType<'a, DIMENSION>
-    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
+impl<'a, LeafStepT, const DIMENSION: usize> HasNodeType<'a, DIMENSION>
+    for Serial<'a, LeafStepT, DIMENSION>
 where
     LeafStepT: HasLeafType<'a, DIMENSION>,
     NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
@@ -246,8 +221,8 @@ where
     type NodeId = NodeId<'a, LeafStepT::Leaf, DIMENSION>;
 }
 
-impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HasLeafType<'a, DIMENSION>
-    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
+impl<'a, LeafStepT, const DIMENSION: usize> HasLeafType<'a, DIMENSION>
+    for Serial<'a, LeafStepT, DIMENSION>
 where
     LeafStepT: HasLeafType<'a, DIMENSION>,
     NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -256,8 +231,7 @@ where
     type Leaf = LeafStepT::Leaf;
 }
 
-impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HasErrorType
-    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
+impl<'a, LeafStepT, const DIMENSION: usize> HasErrorType for Serial<'a, LeafStepT, DIMENSION>
 where
     LeafStepT: HasLeafType<'a, DIMENSION> + HasErrorType,
     NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -266,8 +240,8 @@ where
     type Error = LeafStepT::Error;
 }
 
-impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> LeafStep<'a, DIMENSION>
-    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
+impl<'a, LeafStepT, const DIMENSION: usize> LeafStep<'a, DIMENSION>
+    for Serial<'a, LeafStepT, DIMENSION>
 where
     LeafStepT: LeafStep<'a, DIMENSION>,
     NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -281,28 +255,7 @@ where
     }
 }
 
-impl<'a, T, LeafStepT, ArrayBuilder, WaitWakeT, const LENGTH: usize, const DIMENSION: usize>
-    ParallelBuildArray<'a, T, LeafStepT::Error, LENGTH, DIMENSION>
-    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
-where
-    LeafStepT: HasLeafType<'a, DIMENSION> + HasErrorType,
-    ArrayBuilder: ParallelBuildArray<'a, T, LeafStepT::Error, LENGTH, DIMENSION>,
-    NodeId<'a, LeafStepT::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    T: ArrayRepr<LENGTH, DIMENSION> + Send,
-    IndexVec<DIMENSION>: IndexVecExt,
-    LeafStepT::Error: Send,
-{
-    fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, LeafStepT::Error> + Sync>(
-        &'a self,
-        f: F,
-    ) -> Result<Array<T, LENGTH, DIMENSION>, LeafStepT::Error> {
-        self.array_builder.parallel_build_array(f)
-    }
-}
-
-impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize>
-    Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
+impl<'a, LeafStepT, const DIMENSION: usize> Serial<'a, LeafStepT, DIMENSION>
 where
     LeafStepT: LeafStep<'a, DIMENSION>,
     LeafStepT::Leaf: Hash + Eq,
@@ -310,8 +263,7 @@ where
     Array<NodeId<'a, LeafStepT::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    LeafStepT::Error: From<parallel_hash_table::NotEnoughSpace>,
-    WaitWakeT: WaitWake,
+    LeafStepT::Error: From<serial_hash_table::NotEnoughSpace>,
 {
     fn intern_node(
         &'a self,
@@ -358,8 +310,8 @@ where
     }
 }
 
-impl<'a, LeafStepT, ArrayBuilder, WaitWakeT, const DIMENSION: usize> HashlifeData<'a, DIMENSION>
-    for Parallel<'a, LeafStepT, ArrayBuilder, WaitWakeT, DIMENSION>
+impl<'a, LeafStepT, const DIMENSION: usize> HashlifeData<'a, DIMENSION>
+    for Serial<'a, LeafStepT, DIMENSION>
 where
     LeafStepT: LeafStep<'a, DIMENSION>,
     LeafStepT::Leaf: Hash + Eq,
@@ -367,8 +319,7 @@ where
     Array<NodeId<'a, LeafStepT::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    LeafStepT::Error: From<parallel_hash_table::NotEnoughSpace>,
-    WaitWakeT: WaitWake,
+    LeafStepT::Error: From<serial_hash_table::NotEnoughSpace>,
 {
     fn intern_non_leaf_node(
         &'a self,
@@ -456,14 +407,13 @@ where
 
 #[cfg(test)]
 mod test {
-    use super::Parallel;
+    use super::Serial;
     use crate::{
         array::Array,
         index_vec::{IndexVec, IndexVecForEach},
-        parallel_hash_table::NotEnoughSpace,
-        std_support::{RayonParallel, StdWaitWake},
+        serial_hash_table::NotEnoughSpace,
         traits::{
-            parallel::Hashlife, HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep,
+            serial::Hashlife, HasErrorType, HasLeafType, HasNodeType, HashlifeData, LeafStep,
         },
         NodeAndLevel, NodeOrLeaf,
     };
@@ -502,7 +452,7 @@ mod test {
         }
     }
 
-    type HL<'a> = Parallel<'a, LeafData, RayonParallel, StdWaitWake, DIMENSION>;
+    type HL<'a> = Serial<'a, LeafData, DIMENSION>;
 
     type NodeId<'a> = <HL<'a> as HasNodeType<'a, DIMENSION>>::NodeId;
 
@@ -581,12 +531,7 @@ mod test {
     }
 
     fn make_hashlife<'a>(delay: bool) -> HL<'a> {
-        HL::new(
-            LeafData { delay },
-            RayonParallel::default(),
-            12,
-            StdWaitWake,
-        )
+        HL::new(LeafData { delay }, 12)
     }
 
     #[test]
