@@ -7,6 +7,7 @@ extern crate std;
 
 pub mod array;
 mod array_vec;
+pub mod hash_table;
 pub mod index_vec;
 #[cfg(any(test, feature = "io"))]
 pub mod io;
