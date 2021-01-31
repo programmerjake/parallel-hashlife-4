@@ -1,7 +1,7 @@
 use crate::{
     array::{Array, ArrayRepr},
     index_vec::{IndexVec, IndexVecExt, IndexVecNonzeroDimension, Indexes},
-    parallel_hash_table::{self, ParallelHashTable, WaitWake},
+    parallel_hash_table::{self, ParallelHashTable},
     traits::{parallel::ParallelBuildArray, HasErrorType},
 };
 use ahash::RandomState;
@@ -85,7 +85,16 @@ impl LockShards {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
 pub struct StdWaitWake;
 
-impl WaitWake for StdWaitWake {
+impl crate::parallel_hash_table::WaitWake for StdWaitWake {
+    unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
+        crate::hash_table::WaitWake::wait(self, key, should_cancel);
+    }
+    unsafe fn wake_all(&self, key: NonZeroUsize) {
+        crate::hash_table::WaitWake::wake_all(self, key);
+    }
+}
+
+impl crate::hash_table::WaitWake for StdWaitWake {
     unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
         let lock_shard = LockShards::get().get_shard(key);
         let lock = lock_shard.mutex.lock().unwrap();
