@@ -1,22 +1,18 @@
 use crate::{
     array::{Array, ArrayRepr},
-    index_vec::{IndexVec, IndexVecExt, IndexVecNonzeroDimension, Indexes},
-    parallel_hash_table::{self, ParallelHashTable},
-    traits::{parallel::ParallelBuildArray, HasErrorType},
+    hash_table::{self, sync::WaitWake, HashTableImpl, NotEnoughSpace},
+    index_vec::{IndexVec, IndexVecExt, Indexes},
+    traits::parallel::ParallelBuildArray,
 };
 use ahash::RandomState;
 use core::{
-    cmp,
     convert::TryInto,
-    fmt,
     hash::{BuildHasher, Hash, Hasher},
-    marker::PhantomData,
     num::NonZeroUsize,
     ops::Range,
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
-use parallel_hash_table::NotEnoughSpace;
 use rayon::iter::{
     plumbing, plumbing::Producer, IndexedParallelIterator, IntoParallelIterator, ParallelIterator,
 };
@@ -85,16 +81,7 @@ impl LockShards {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
 pub struct StdWaitWake;
 
-impl crate::parallel_hash_table::WaitWake for StdWaitWake {
-    unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
-        crate::hash_table::WaitWake::wait(self, key, should_cancel);
-    }
-    unsafe fn wake_all(&self, key: NonZeroUsize) {
-        crate::hash_table::WaitWake::wake_all(self, key);
-    }
-}
-
-impl crate::hash_table::WaitWake for StdWaitWake {
+impl WaitWake for StdWaitWake {
     unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
         let lock_shard = LockShards::get().get_shard(key);
         let lock = lock_shard.mutex.lock().unwrap();
@@ -184,8 +171,8 @@ where
     }
 }
 
-impl<'a, T, Error, const LENGTH: usize, const DIMENSION: usize>
-    ParallelBuildArray<'a, T, Error, LENGTH, DIMENSION> for RayonParallel
+impl<T, Error, const LENGTH: usize, const DIMENSION: usize>
+    ParallelBuildArray<T, Error, LENGTH, DIMENSION> for RayonParallel
 where
     T: ArrayRepr<LENGTH, DIMENSION> + Send,
     Option<T>: ArrayRepr<LENGTH, DIMENSION> + Send,
@@ -193,7 +180,7 @@ where
     Error: Send,
 {
     fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Error> + Sync>(
-        &'a self,
+        &self,
         f: F,
     ) -> Result<Array<T, LENGTH, DIMENSION>, Error> {
         let mut retval = Array::<Option<T>, LENGTH, DIMENSION>::build_array(|_| None);
@@ -216,16 +203,20 @@ where
     }
 }
 
-pub struct ParallelHashTableParIter<'a, T>(pub parallel_hash_table::Iter<'a, T>);
+pub struct HashTableParIter<'a, HTI: HashTableImpl, Value>(pub hash_table::Iter<'a, HTI, Value>);
 
-impl<'a, T> Clone for ParallelHashTableParIter<'a, T> {
+impl<'a, HTI: HashTableImpl, Value> Clone for HashTableParIter<'a, HTI, Value> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<'a, T: Send + Sync> ParallelIterator for ParallelHashTableParIter<'a, T> {
-    type Item = &'a T;
+impl<'a, HTI: HashTableImpl, Value> ParallelIterator for HashTableParIter<'a, HTI, Value>
+where
+    hash_table::Iter<'a, HTI, Value>: Send,
+    &'a Value: Send,
+{
+    type Item = (usize, &'a Value);
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
         C: plumbing::UnindexedConsumer<Self::Item>,
@@ -234,8 +225,11 @@ impl<'a, T: Send + Sync> ParallelIterator for ParallelHashTableParIter<'a, T> {
     }
 }
 
-impl<'a, T: Send + Sync> plumbing::UnindexedProducer for ParallelHashTableParIter<'a, T> {
-    type Item = &'a T;
+impl<'a, HTI: HashTableImpl, Value> plumbing::UnindexedProducer for HashTableParIter<'a, HTI, Value>
+where
+    hash_table::Iter<'a, HTI, Value>: Send,
+{
+    type Item = (usize, &'a Value);
     fn split(self) -> (Self, Option<Self>) {
         let (first_half, last_half) = self.0.split();
         (Self(first_half), last_half.map(Self))
@@ -248,26 +242,40 @@ impl<'a, T: Send + Sync> plumbing::UnindexedProducer for ParallelHashTableParIte
     }
 }
 
-impl<'a, T: Send + Sync, W> IntoParallelIterator for &'a ParallelHashTable<T, W> {
-    type Iter = ParallelHashTableParIter<'a, T>;
-    type Item = &'a T;
+impl<'a, HTI: HashTableImpl, Value> IntoParallelIterator for &'a hash_table::HashTable<HTI, Value>
+where
+    hash_table::Iter<'a, HTI, Value>: Send,
+    &'a Value: Send,
+{
+    type Iter = HashTableParIter<'a, HTI, Value>;
+    type Item = (usize, &'a Value);
     fn into_par_iter(self) -> Self::Iter {
-        ParallelHashTableParIter(self.iter())
+        HashTableParIter(self.iter())
     }
 }
 
-impl<'a, T: Send + Sync> IntoParallelIterator for parallel_hash_table::Iter<'a, T> {
-    type Iter = ParallelHashTableParIter<'a, T>;
-    type Item = &'a T;
+impl<'a, HTI: HashTableImpl, Value> IntoParallelIterator for hash_table::Iter<'a, HTI, Value>
+where
+    Self: Send,
+    &'a Value: Send,
+{
+    type Iter = HashTableParIter<'a, HTI, Value>;
+    type Item = (usize, &'a Value);
     fn into_par_iter(self) -> Self::Iter {
-        ParallelHashTableParIter(self)
+        HashTableParIter(self)
     }
 }
 
-pub struct ParallelHashTableParIterMut<'a, T>(pub parallel_hash_table::IterMut<'a, T>);
+pub struct HashTableParIterMut<'a, HTI: HashTableImpl, Value>(
+    pub hash_table::IterMut<'a, HTI, Value>,
+);
 
-impl<'a, T: Send + Sync> ParallelIterator for ParallelHashTableParIterMut<'a, T> {
-    type Item = parallel_hash_table::EntryMut<'a, T>;
+impl<'a, HTI: HashTableImpl, Value> ParallelIterator for HashTableParIterMut<'a, HTI, Value>
+where
+    hash_table::IterMut<'a, HTI, Value>: Send,
+    Value: Send,
+{
+    type Item = (usize, &'a mut Value);
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
         C: plumbing::UnindexedConsumer<Self::Item>,
@@ -276,8 +284,12 @@ impl<'a, T: Send + Sync> ParallelIterator for ParallelHashTableParIterMut<'a, T>
     }
 }
 
-impl<'a, T: Send + Sync> plumbing::UnindexedProducer for ParallelHashTableParIterMut<'a, T> {
-    type Item = parallel_hash_table::EntryMut<'a, T>;
+impl<'a, HTI: HashTableImpl, Value> plumbing::UnindexedProducer
+    for HashTableParIterMut<'a, HTI, Value>
+where
+    hash_table::IterMut<'a, HTI, Value>: Send,
+{
+    type Item = (usize, &'a mut Value);
     fn split(self) -> (Self, Option<Self>) {
         let (first_half, last_half) = self.0.split();
         (Self(first_half), last_half.map(Self))
@@ -290,19 +302,28 @@ impl<'a, T: Send + Sync> plumbing::UnindexedProducer for ParallelHashTableParIte
     }
 }
 
-impl<'a, T: Send + Sync, W> IntoParallelIterator for &'a mut ParallelHashTable<T, W> {
-    type Iter = ParallelHashTableParIterMut<'a, T>;
-    type Item = parallel_hash_table::EntryMut<'a, T>;
+impl<'a, HTI: HashTableImpl, Value> IntoParallelIterator
+    for &'a mut hash_table::HashTable<HTI, Value>
+where
+    hash_table::IterMut<'a, HTI, Value>: Send,
+    Value: Send,
+{
+    type Iter = HashTableParIterMut<'a, HTI, Value>;
+    type Item = (usize, &'a mut Value);
     fn into_par_iter(self) -> Self::Iter {
-        ParallelHashTableParIterMut(self.iter_mut())
+        HashTableParIterMut(self.iter_mut())
     }
 }
 
-impl<'a, T: Send + Sync> IntoParallelIterator for parallel_hash_table::IterMut<'a, T> {
-    type Iter = ParallelHashTableParIterMut<'a, T>;
-    type Item = parallel_hash_table::EntryMut<'a, T>;
+impl<'a, HTI: HashTableImpl, Value> IntoParallelIterator for hash_table::IterMut<'a, HTI, Value>
+where
+    hash_table::IterMut<'a, HTI, Value>: Send,
+    Value: Send,
+{
+    type Iter = HashTableParIterMut<'a, HTI, Value>;
+    type Item = (usize, &'a mut Value);
     fn into_par_iter(self) -> Self::Iter {
-        ParallelHashTableParIterMut(self)
+        HashTableParIterMut(self)
     }
 }
 

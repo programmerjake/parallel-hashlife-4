@@ -12,13 +12,11 @@ pub mod index_vec;
 #[cfg(any(test, feature = "io"))]
 pub mod io;
 pub mod parallel;
-pub mod parallel_hash_table;
-pub mod serial;
-pub mod serial_hash_table;
 pub mod simple;
 #[cfg(any(test, feature = "std"))]
 pub mod std_support;
-#[cfg(test)]
+#[doc(hidden)]
+#[cfg(any(test, feature = "io"))]
 pub mod testing;
 pub mod traits;
 

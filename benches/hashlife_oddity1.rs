@@ -8,7 +8,7 @@ use test::Bencher;
 
 const PATTERN: &'static str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/patterns/spacefiller.mc"
+    "/patterns/hashlife-oddity1.mc"
 ));
 
 #[bench]
@@ -17,7 +17,7 @@ fn serial_simple_bench(bencher: &mut Bencher) {
         testing::run_serial_simple(
             test::black_box(PATTERN),
             testing::life::LeafData,
-            50,
+            8,
             |_hl, node| {
                 test::black_box(node);
                 Ok(())
@@ -33,8 +33,8 @@ fn serial_bench(bencher: &mut Bencher) {
         testing::run_serial(
             test::black_box(PATTERN),
             testing::life::LeafData,
-            17,
-            50,
+            18,
+            8,
             |_hl, node| {
                 test::black_box(node);
                 Ok(())
@@ -50,8 +50,8 @@ fn parallel_bench(bencher: &mut Bencher) {
         testing::run_parallel(
             test::black_box(PATTERN),
             testing::life::LeafData,
-            17,
-            50,
+            18,
+            8,
             |_hl, node| {
                 test::black_box(node);
                 Ok(())

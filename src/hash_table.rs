@@ -3,47 +3,42 @@ use alloc::{
     vec::{self, Vec},
 };
 use core::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     fmt::{self, Debug},
-    hint::spin_loop,
     iter::{self, FusedIterator},
     marker::PhantomData,
     mem::{self, MaybeUninit},
-    num::{NonZeroU32, NonZeroUsize},
+    num::NonZeroU32,
     ops::Range,
     ptr::NonNull,
     slice,
-    sync::atomic::{AtomicU32, Ordering},
 };
+use sync::WaitWake;
 
-pub trait WaitWake {
-    /// Does the following steps:
-    /// 1. Lock the mutex associated with key `key`.
-    /// 2. If `should_cancel()` returns `true`, unlock the mutex and return without blocking.
-    /// 3. Atomically unlock the mutex and wait for wake-ups associated with key `key`.
-    /// It is valid for `wait` to stop waiting even without any associated wake-ups.
-    /// # Safety
-    /// `key` must be a memory address controlled by the caller.
-    /// `should_cancel` must not call `wait` or `wake_all` and must not panic.
-    unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC);
-    /// wake all waiting threads that have the key `key`
-    /// # Safety
-    /// `key` must be a memory address controlled by the caller
-    unsafe fn wake_all(&self, key: NonZeroUsize);
+pub mod sync;
+pub mod unsync;
+
+mod sealed {
+    pub trait Sealed {}
 }
 
-impl<T: WaitWake> WaitWake for &'_ T {
-    unsafe fn wait<SC: FnOnce() -> bool>(&self, key: NonZeroUsize, should_cancel: SC) {
-        (**self).wait(key, should_cancel);
-    }
-    unsafe fn wake_all(&self, key: NonZeroUsize) {
-        (**self).wake_all(key);
-    }
+impl sealed::Sealed for unsync::UnsyncHashTableImpl {}
+impl<W: sync::WaitWake> sealed::Sealed for sync::SyncHashTableImpl<W> {}
+
+pub trait IndexCell: 'static + Debug + Sized {
+    const ZERO: Self;
+    fn get_mut(&mut self) -> &mut usize;
+    fn new(v: usize) -> Self;
+    fn into_inner(self) -> usize;
+    fn get(&self) -> usize;
+    fn replace(&self, v: usize) -> usize;
+    fn set(&self, v: usize);
 }
 
-unsafe trait HashTableImpl {
+pub unsafe trait HashTableImpl: sealed::Sealed {
     type FullState: 'static + Debug + Eq + Copy;
     type StateCell: 'static + Debug;
+    type IndexCell: IndexCell;
     const STATE_CELL_EMPTY: Self::StateCell;
     fn make_full_state(hash: u64) -> Self::FullState;
     fn read_state(state_cell: &Self::StateCell) -> Option<Self::FullState>;
@@ -61,9 +56,6 @@ unsafe trait HashTableImpl {
 
 const STATE_EMPTY: u32 = 0;
 const STATE_LOCKED: u32 = STATE_EMPTY + 1;
-const STATE_LOCKED_WAITERS: u32 = STATE_LOCKED + 1;
-const UNSYNC_STATE_FIRST_FULL: u32 = STATE_LOCKED + 1;
-const SYNC_STATE_FIRST_FULL: u32 = STATE_LOCKED_WAITERS + 1;
 
 fn make_full_state<const STATE_FIRST_FULL: u32>(hash: u64) -> NonZeroU32 {
     let retval = (hash >> 32) as u32;
@@ -75,156 +67,6 @@ fn make_full_state<const STATE_FIRST_FULL: u32>(hash: u64) -> NonZeroU32 {
         return NonZeroU32::new(retval).unwrap();
     }
     NonZeroU32::new(STATE_FIRST_FULL).unwrap()
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-struct UnsyncHashTableImpl;
-
-unsafe impl HashTableImpl for UnsyncHashTableImpl {
-    type FullState = NonZeroU32;
-
-    type StateCell = Cell<u32>;
-
-    const STATE_CELL_EMPTY: Self::StateCell = Cell::new(STATE_EMPTY);
-
-    fn make_full_state(hash: u64) -> Self::FullState {
-        make_full_state::<UNSYNC_STATE_FIRST_FULL>(hash)
-    }
-
-    fn read_state(state_cell: &Self::StateCell) -> Option<Self::FullState> {
-        let retval = state_cell.get();
-        if retval >= UNSYNC_STATE_FIRST_FULL {
-            Some(NonZeroU32::new(retval).unwrap())
-        } else {
-            None
-        }
-    }
-
-    unsafe fn lock_state(&self, state_cell: &Self::StateCell) -> Result<(), Self::FullState> {
-        let state = state_cell.get();
-        if state >= UNSYNC_STATE_FIRST_FULL {
-            Err(NonZeroU32::new(state).unwrap())
-        } else {
-            assert_eq!(
-                state_cell.replace(STATE_LOCKED),
-                STATE_EMPTY,
-                "attempt to lock already locked UnsyncHashTable entry"
-            );
-            Ok(())
-        }
-    }
-
-    unsafe fn unlock_and_fill_state(
-        &self,
-        state_cell: &Self::StateCell,
-        full_state: Self::FullState,
-    ) {
-        debug_assert!(full_state.get() >= UNSYNC_STATE_FIRST_FULL);
-        let state = state_cell.replace(full_state.get());
-        debug_assert_eq!(state, STATE_LOCKED);
-    }
-
-    unsafe fn unlock_and_empty_state(&self, state_cell: &Self::StateCell) {
-        let state = state_cell.replace(STATE_EMPTY);
-        debug_assert_eq!(state, STATE_LOCKED);
-    }
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-struct SyncHashTableImpl<W: WaitWake> {
-    wait_waker: W,
-}
-
-unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
-    type FullState = NonZeroU32;
-
-    type StateCell = AtomicU32;
-
-    const STATE_CELL_EMPTY: Self::StateCell = AtomicU32::new(STATE_EMPTY);
-
-    fn make_full_state(hash: u64) -> Self::FullState {
-        make_full_state::<SYNC_STATE_FIRST_FULL>(hash)
-    }
-
-    fn read_state(state_cell: &Self::StateCell) -> Option<Self::FullState> {
-        let retval = state_cell.load(Ordering::Acquire);
-        if retval >= SYNC_STATE_FIRST_FULL {
-            Some(NonZeroU32::new(retval).unwrap())
-        } else {
-            None
-        }
-    }
-
-    fn read_state_nonatomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
-        let retval = *state_cell.get_mut();
-        if retval >= SYNC_STATE_FIRST_FULL {
-            Some(NonZeroU32::new(retval).unwrap())
-        } else {
-            None
-        }
-    }
-
-    unsafe fn lock_state(&self, state_cell: &Self::StateCell) -> Result<(), Self::FullState> {
-        let mut spin_count = 0;
-        let mut state = state_cell.load(Ordering::Acquire);
-        loop {
-            if state >= SYNC_STATE_FIRST_FULL {
-                return Err(NonZeroU32::new(state).unwrap());
-            }
-            if state != STATE_EMPTY && spin_count < 32 {
-                spin_count += 1;
-                state = state_cell.load(Ordering::Acquire);
-                spin_loop();
-                continue;
-            }
-            if let Err(v) = state_cell.compare_exchange_weak(
-                state,
-                if state == STATE_EMPTY {
-                    STATE_LOCKED
-                } else {
-                    STATE_LOCKED_WAITERS
-                },
-                Ordering::Acquire,
-                Ordering::Acquire,
-            ) {
-                state = v;
-                spin_loop();
-                continue;
-            }
-            if state == STATE_EMPTY {
-                return Ok(());
-            }
-            self.wait_waker.wait(
-                NonZeroUsize::new_unchecked(state_cell as *const _ as usize),
-                || state_cell.load(Ordering::Acquire) != STATE_LOCKED_WAITERS,
-            );
-        }
-    }
-
-    unsafe fn unlock_and_fill_state(
-        &self,
-        state_cell: &Self::StateCell,
-        full_state: Self::FullState,
-    ) {
-        debug_assert!(full_state.get() >= SYNC_STATE_FIRST_FULL);
-        let state = state_cell.swap(full_state.get(), Ordering::Release);
-        if state == STATE_LOCKED_WAITERS {
-            self.wait_waker
-                .wake_all(NonZeroUsize::new_unchecked(state_cell as *const _ as usize));
-        } else {
-            debug_assert_eq!(state, STATE_LOCKED);
-        }
-    }
-
-    unsafe fn unlock_and_empty_state(&self, state_cell: &Self::StateCell) {
-        let state = state_cell.swap(STATE_EMPTY, Ordering::Release);
-        if state == STATE_LOCKED_WAITERS {
-            self.wait_waker
-                .wake_all(NonZeroUsize::new_unchecked(state_cell as *const _ as usize));
-        } else {
-            debug_assert_eq!(state, STATE_LOCKED);
-        }
-    }
 }
 
 /// use separate non-generic struct to work around drop check
@@ -312,14 +154,12 @@ impl HashTableStorage {
         state_cells: Box<[HTI::StateCell]>,
         values: Box<[UnsafeCell<MaybeUninit<Value>>]>,
     ) -> Self {
-        unsafe {
-            Self {
-                internal: Some(HashTableStorageInternal::from_boxes::<
-                    HTI::StateCell,
-                    UnsafeCell<MaybeUninit<Value>>,
-                >(state_cells, values)),
-                drop_fn: Self::drop_fn::<HTI, Value>,
-            }
+        Self {
+            internal: Some(HashTableStorageInternal::from_boxes::<
+                HTI::StateCell,
+                UnsafeCell<MaybeUninit<Value>>,
+            >(state_cells, values)),
+            drop_fn: Self::drop_fn::<HTI, Value>,
         }
     }
     unsafe fn take<HTI: HashTableImpl, Value>(
@@ -348,7 +188,7 @@ impl HashTableStorage {
     }
 }
 
-struct HashTable<HTI: HashTableImpl, Value> {
+pub struct HashTable<HTI: HashTableImpl, Value> {
     storage: HashTableStorage,
     _phantom: PhantomData<Value>,
     hash_table_impl: HTI,
@@ -371,14 +211,43 @@ where
 {
 }
 
+impl<Value, W: WaitWake> sync::HashTable<Value, W> {
+    pub fn with_wait_waker(log2_capacity: u32, wait_waker: W) -> Self {
+        Self::with_impl(log2_capacity, sync::SyncHashTableImpl { wait_waker })
+    }
+    pub fn with_wait_waker_and_probe_distance(
+        log2_capacity: u32,
+        wait_waker: W,
+        probe_distance: usize,
+    ) -> Self {
+        Self::with_impl_and_probe_distance(
+            log2_capacity,
+            sync::SyncHashTableImpl { wait_waker },
+            probe_distance,
+        )
+    }
+}
+
 impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
-    fn new(log2_capacity: u32, hash_table_impl: HTI) -> Self {
+    pub fn with_impl(log2_capacity: u32, hash_table_impl: HTI) -> Self {
         let capacity = 1isize
             .checked_shl(log2_capacity)
             .expect("capacity is too big") as usize;
-        Self::with_probe_distance(log2_capacity, hash_table_impl, capacity.min(16))
+        Self::with_impl_and_probe_distance(log2_capacity, hash_table_impl, capacity.min(16))
     }
-    fn with_probe_distance(
+    pub fn new(log2_capacity: u32) -> Self
+    where
+        HTI: Default,
+    {
+        Self::with_impl(log2_capacity, HTI::default())
+    }
+    pub fn with_probe_distance(log2_capacity: u32, probe_distance: usize) -> Self
+    where
+        HTI: Default,
+    {
+        Self::with_impl_and_probe_distance(log2_capacity, HTI::default(), probe_distance)
+    }
+    pub fn with_impl_and_probe_distance(
         log2_capacity: u32,
         hash_table_impl: HTI,
         probe_distance: usize,
@@ -400,25 +269,25 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
             }
         }
     }
-    fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         self.storage.capacity()
     }
-    fn probe_distance(&self) -> usize {
+    pub fn probe_distance(&self) -> usize {
         self.probe_distance
     }
-    fn iter<'a>(&'a self) -> Iter<'a, HTI, Value> {
+    pub fn iter<'a>(&'a self) -> Iter<'a, HTI, Value> {
         self.into_iter()
     }
-    fn iter_mut<'a>(&'a mut self) -> IterMut<'a, HTI, Value> {
+    pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a, HTI, Value> {
         self.into_iter()
     }
-    fn hash_table_impl(&self) -> &HTI {
+    pub fn hash_table_impl(&self) -> &HTI {
         &self.hash_table_impl
     }
-    fn hash_table_impl_mut(&mut self) -> &mut HTI {
+    pub fn hash_table_impl_mut(&mut self) -> &mut HTI {
         &mut self.hash_table_impl
     }
-    fn index<'a>(&'a self, index: usize) -> Option<&'a Value> {
+    pub fn index<'a>(&'a self, index: usize) -> Option<&'a Value> {
         unsafe {
             let (state_cells, values) = self.storage.state_cells_values::<HTI, Value>();
             let state_cell = state_cells.get(index)?;
@@ -429,7 +298,7 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
             }
         }
     }
-    fn index_mut<'a>(&'a mut self, index: usize) -> Option<&'a mut Value> {
+    pub fn index_mut<'a>(&'a mut self, index: usize) -> Option<&'a mut Value> {
         unsafe {
             let (state_cells, values) = self.storage.state_cells_values_mut::<HTI, Value>();
             let state_cell = state_cells.get_mut(index)?;
@@ -448,7 +317,7 @@ impl<HTI: HashTableImpl, Value: fmt::Debug> fmt::Debug for HashTable<HTI, Value>
     }
 }
 
-struct LockedEntry<'a, HTI: HashTableImpl, Value> {
+pub struct LockedEntry<'a, HTI: HashTableImpl, Value> {
     state_cell: &'a HTI::StateCell,
     value: &'a UnsafeCell<MaybeUninit<Value>>,
     full_state: HTI::FullState,
@@ -456,7 +325,7 @@ struct LockedEntry<'a, HTI: HashTableImpl, Value> {
 }
 
 impl<'a, HTI: HashTableImpl, Value> LockedEntry<'a, HTI, Value> {
-    fn fill(self, value: Value) -> &'a Value {
+    pub fn fill(self, value: Value) -> &'a Value {
         let state_cell = self.state_cell;
         let value_cell = self.value;
         let full_state = self.full_state;
@@ -476,7 +345,7 @@ impl<HTI: HashTableImpl, Value> Drop for LockedEntry<'_, HTI, Value> {
     }
 }
 
-enum LockResult<'a, HTI: HashTableImpl, Value> {
+pub enum LockResult<'a, HTI: HashTableImpl, Value> {
     Vacant(LockedEntry<'a, HTI, Value>),
     Full(&'a Value),
 }
@@ -528,7 +397,7 @@ impl fmt::Display for NotEnoughSpace {
 }
 
 impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
-    fn find<'a, F: FnMut(usize, &'a Value) -> bool>(
+    pub fn find<'a, F: FnMut(usize, &'a Value) -> bool>(
         &'a self,
         hash: u64,
         mut entry_eq: F,
@@ -549,28 +418,31 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
         }
         None
     }
-    fn lock_entry<'a, F: FnMut(usize, &'a Value) -> bool>(
+    pub fn lock_entry<'a, F: FnMut(usize, &'a Value) -> bool>(
         &'a self,
         hash: u64,
         mut entry_eq: F,
-    ) -> Result<LockResult<'a, HTI, Value>, NotEnoughSpace> {
+    ) -> Result<(usize, LockResult<'a, HTI, Value>), NotEnoughSpace> {
         let full_state = HTI::make_full_state(hash);
         for (index, state_cell, value) in self.probe_sequence(hash) {
             unsafe {
                 match self.hash_table_impl.lock_state(state_cell) {
                     Ok(()) => {
-                        return Ok(LockResult::Vacant(LockedEntry {
-                            state_cell,
-                            value,
-                            full_state,
-                            hash_table_impl: &self.hash_table_impl,
-                        }));
+                        return Ok((
+                            index,
+                            LockResult::Vacant(LockedEntry {
+                                state_cell,
+                                value,
+                                full_state,
+                                hash_table_impl: &self.hash_table_impl,
+                            }),
+                        ));
                     }
                     Err(state) => {
                         if state == full_state {
                             let value = &*(value.get() as *const Value);
                             if entry_eq(index, value) {
-                                return Ok(LockResult::Full(value));
+                                return Ok((index, LockResult::Full(value)));
                             }
                         }
                     }
@@ -581,7 +453,7 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
     }
 }
 
-struct IntoIter<HTI: HashTableImpl, Value> {
+pub struct IntoIter<HTI: HashTableImpl, Value> {
     state_cells: iter::Enumerate<vec::IntoIter<HTI::StateCell>>,
     values: Box<[UnsafeCell<MaybeUninit<Value>>]>,
 }
@@ -650,7 +522,7 @@ impl<HTI: HashTableImpl, Value> IntoIterator for HashTable<HTI, Value> {
     }
 }
 
-struct Iter<'a, HTI: HashTableImpl, Value> {
+pub struct Iter<'a, HTI: HashTableImpl, Value> {
     state_cells: iter::Enumerate<slice::Iter<'a, HTI::StateCell>>,
     values: &'a [UnsafeCell<MaybeUninit<Value>>],
 }
@@ -679,7 +551,7 @@ fn test_split_iter() {
 }
 
 impl<'a, HTI: HashTableImpl, Value> Iter<'a, HTI, Value> {
-    fn split(&self) -> (Self, Option<Self>) {
+    pub fn split(&self) -> (Self, Option<Self>) {
         let (first_half, last_half) = split_iter(self.state_cells.clone());
         (
             Self {
@@ -763,14 +635,14 @@ impl<'a, HTI: HashTableImpl, Value> IntoIterator for &'a HashTable<HTI, Value> {
     }
 }
 
-struct IterMut<'a, HTI: HashTableImpl, Value> {
+pub struct IterMut<'a, HTI: HashTableImpl, Value> {
     range: Range<usize>,
     state_cells: *mut HTI::StateCell,
     values: &'a [UnsafeCell<MaybeUninit<Value>>],
 }
 
 impl<'a, HTI: HashTableImpl, Value> IterMut<'a, HTI, Value> {
-    fn split(self) -> (Self, Option<Self>) {
+    pub fn split(self) -> (Self, Option<Self>) {
         let (first_half, last_half) = split_iter(self.range.clone());
         (
             Self {
@@ -845,7 +717,10 @@ impl<'a, HTI: HashTableImpl, Value> IntoIterator for &'a mut HashTable<HTI, Valu
 
 #[cfg(test)]
 mod test {
-    use super::{HashTable, LockResult, SyncHashTableImpl, UnsyncHashTableImpl, WaitWake};
+    use super::{
+        sync::{self, WaitWake},
+        unsync, LockResult,
+    };
     use crate::std_support::StdWaitWake;
     use alloc::{sync::Arc, vec::Vec};
     use core::{
@@ -905,8 +780,7 @@ mod test {
 
     #[test]
     fn arena_test() {
-        let ht: HashTable<UnsyncHashTableImpl, EntryWithLifetime<'_>> =
-            HashTable::new(2, Default::default());
+        let ht: unsync::HashTable<EntryWithLifetime<'_>> = unsync::HashTable::new(2);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &EntryWithLifetime<'_>| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -915,22 +789,22 @@ mod test {
         };
         let entry1 = EntryWithLifetime(Entry::new(), RefCell::new(None));
         let entry_ref1 = match ht.lock_entry(hasher(&entry1), |_index, v| *v == entry1) {
-            Ok(LockResult::Vacant(locked_entry)) => {
+            Ok((_index, LockResult::Vacant(locked_entry))) => {
                 let v = locked_entry.fill(entry1.clone());
                 assert_eq!(*v, entry1);
                 v
             }
-            Ok(LockResult::Full(_)) => unreachable!(),
+            Ok((_index, LockResult::Full(_))) => unreachable!(),
             Err(super::NotEnoughSpace) => unreachable!(),
         };
         let entry2 = EntryWithLifetime(Entry::new(), RefCell::new(None));
         let entry_ref2 = match ht.lock_entry(hasher(&entry2), |_index, v| *v == entry2) {
-            Ok(LockResult::Vacant(locked_entry)) => {
+            Ok((_index, LockResult::Vacant(locked_entry))) => {
                 let v = locked_entry.fill(entry2.clone());
                 assert_eq!(*v, entry2);
                 v
             }
-            Ok(LockResult::Full(_)) => unreachable!(),
+            Ok((_index, LockResult::Full(_))) => unreachable!(),
             Err(super::NotEnoughSpace) => unreachable!(),
         };
         *entry_ref1.1.borrow_mut() = Some(entry_ref2);
@@ -948,8 +822,7 @@ mod test {
     fn drop_test() {
         let item1_count = AtomicUsize::new(0);
         let item2_count = AtomicUsize::new(0);
-        let ht: HashTable<UnsyncHashTableImpl, (Entry, DropTestHelper<'_>)> =
-            HashTable::new(6, Default::default());
+        let ht: unsync::HashTable<(Entry, DropTestHelper<'_>)> = unsync::HashTable::new(6);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &Entry| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -958,18 +831,18 @@ mod test {
         };
         let entry1 = Entry::new();
         match ht.lock_entry(hasher(&entry1), |_index, v| v.0 == entry1) {
-            Ok(LockResult::Vacant(locked_entry)) => {
+            Ok((_index, LockResult::Vacant(locked_entry))) => {
                 locked_entry.fill((entry1.clone(), DropTestHelper(&item1_count)))
             }
-            Ok(LockResult::Full(_)) => unreachable!(),
+            Ok((_index, LockResult::Full(_))) => unreachable!(),
             Err(super::NotEnoughSpace) => unreachable!(),
         };
         let entry2 = Entry::new();
         match ht.lock_entry(hasher(&entry2), |_index, v| v.0 == entry2) {
-            Ok(LockResult::Vacant(locked_entry)) => {
+            Ok((_index, LockResult::Vacant(locked_entry))) => {
                 locked_entry.fill((entry2.clone(), DropTestHelper(&item2_count)))
             }
-            Ok(LockResult::Full(_)) => unreachable!(),
+            Ok((_index, LockResult::Full(_))) => unreachable!(),
             Err(super::NotEnoughSpace) => unreachable!(),
         };
         assert_eq!(item1_count.load(Ordering::Relaxed), 0);
@@ -981,7 +854,7 @@ mod test {
 
     #[test]
     fn test1() {
-        let mut ht: HashTable<UnsyncHashTableImpl, Entry> = HashTable::new(6, Default::default());
+        let ht: unsync::HashTable<Entry> = unsync::HashTable::new(6);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &Entry| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -993,7 +866,7 @@ mod test {
             if i.wrapping_mul(0xA331_ABB2_E016_BC0A_u64) >> 63 != 0 {
                 let entry = Entry::new();
                 match ht.lock_entry(hasher(&entry), |_index, v| *v == entry) {
-                    Ok(LockResult::Vacant(locked_entry)) => {
+                    Ok((_index, LockResult::Vacant(locked_entry))) => {
                         assert_eq!(*locked_entry.fill(entry.clone()), entry);
                         assert!(
                             reference_ht.insert(entry.clone()),
@@ -1001,7 +874,7 @@ mod test {
                             entry
                         );
                     }
-                    Ok(LockResult::Full(old_entry)) => {
+                    Ok((_index, LockResult::Full(old_entry))) => {
                         assert_eq!(reference_ht.get(&entry), Some(old_entry));
                     }
                     Err(super::NotEnoughSpace) => {
@@ -1078,11 +951,9 @@ mod test {
             Finish,
             Sync,
         }
-        let ht = Arc::new(HashTable::new(
+        let ht = Arc::new(sync::HashTable::with_wait_waker(
             8,
-            SyncHashTableImpl {
-                wait_waker: WaitWakeTracker::new(StdWaitWake),
-            },
+            WaitWakeTracker::new(StdWaitWake),
         ));
         let hasher = DefaultHashBuilder::new();
         let hasher = move |entry: &Entry| -> u64 {
@@ -1102,6 +973,7 @@ mod test {
                             match ht
                                 .lock_entry(hasher(&entry), |_index, v| *v == entry)
                                 .unwrap()
+                                .1
                             {
                                 LockResult::Vacant(lock) => lock.fill(entry),
                                 LockResult::Full(_) => {
@@ -1113,6 +985,7 @@ mod test {
                             match ht
                                 .lock_entry(hasher(&entry), |_index, v| *v == entry)
                                 .unwrap()
+                                .1
                             {
                                 LockResult::Vacant(_) => panic!("expected full entry: {:?}", entry),
                                 LockResult::Full(v) => assert_eq!(v, &entry),
@@ -1122,6 +995,7 @@ mod test {
                             let lock = match ht
                                 .lock_entry(hasher(&entry), |_index, v| *v == entry)
                                 .unwrap()
+                                .1
                             {
                                 LockResult::Vacant(lock) => lock,
                                 LockResult::Full(_) => {

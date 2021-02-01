@@ -130,9 +130,9 @@ where
 type Node<Leaf, const DIMENSION: usize> =
     NodeOrLeaf<NodeData<Leaf, DIMENSION>, Array<Leaf, 2, DIMENSION>>;
 
-pub struct Simple<'a, LeafData, const DIMENSION: usize>
+pub struct Simple<LeafData, const DIMENSION: usize>
 where
-    LeafData: HasLeafType<'a, DIMENSION>,
+    LeafData: HasLeafType<DIMENSION>,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
@@ -141,9 +141,9 @@ where
     empty_nodes: RefCell<Vec<NodeId<LeafData::Leaf, DIMENSION>>>,
 }
 
-impl<'a, LeafData, const DIMENSION: usize> Simple<'a, LeafData, DIMENSION>
+impl<LeafData, const DIMENSION: usize> Simple<LeafData, DIMENSION>
 where
-    LeafData: HasLeafType<'a, DIMENSION>,
+    LeafData: HasLeafType<DIMENSION>,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
@@ -165,56 +165,52 @@ where
     }
 }
 
-impl<'a, LeafData, const DIMENSION: usize> HasErrorType for Simple<'a, LeafData, DIMENSION>
+impl<LeafData, const DIMENSION: usize> HasErrorType for Simple<LeafData, DIMENSION>
 where
-    LeafData: HasLeafType<'a, DIMENSION> + HasErrorType,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     type Error = LeafData::Error;
 }
 
-impl<'a, LeafData, const DIMENSION: usize> HasLeafType<'a, DIMENSION>
-    for Simple<'a, LeafData, DIMENSION>
+impl<LeafData, const DIMENSION: usize> HasLeafType<DIMENSION> for Simple<LeafData, DIMENSION>
 where
-    LeafData: HasLeafType<'a, DIMENSION> + HasErrorType,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     type Leaf = LeafData::Leaf;
 }
 
-impl<'a, LeafData, const DIMENSION: usize> HasNodeType<'a, DIMENSION>
-    for Simple<'a, LeafData, DIMENSION>
+impl<LeafData, const DIMENSION: usize> HasNodeType<DIMENSION> for Simple<LeafData, DIMENSION>
 where
-    LeafData: HasLeafType<'a, DIMENSION> + HasErrorType,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<NodeId<LeafData::Leaf, DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    LeafData::Leaf: 'a,
 {
     type NodeId = NodeId<LeafData::Leaf, DIMENSION>;
 }
 
-impl<'a, LeafData, const DIMENSION: usize> LeafStep<'a, DIMENSION>
-    for Simple<'a, LeafData, DIMENSION>
+impl<LeafData, const DIMENSION: usize> LeafStep<DIMENSION> for Simple<LeafData, DIMENSION>
 where
-    LeafData: LeafStep<'a, DIMENSION>,
+    LeafData: LeafStep<DIMENSION>,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     fn leaf_step(
-        &'a self,
+        &self,
         neighborhood: Array<Self::Leaf, 3, DIMENSION>,
     ) -> Result<Self::Leaf, Self::Error> {
         self.leaf_data.leaf_step(neighborhood)
     }
 }
 
-impl<'a, LeafData, const DIMENSION: usize> Simple<'a, LeafData, DIMENSION>
+impl<LeafData, const DIMENSION: usize> Simple<LeafData, DIMENSION>
 where
-    LeafData: HasLeafType<'a, DIMENSION> + HasErrorType,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
@@ -237,10 +233,9 @@ where
     }
 }
 
-impl<'a, LeafData, const DIMENSION: usize> HashlifeData<'a, DIMENSION>
-    for Simple<'a, LeafData, DIMENSION>
+impl<LeafData, const DIMENSION: usize> HashlifeData<DIMENSION> for Simple<LeafData, DIMENSION>
 where
-    LeafData: HasLeafType<'a, DIMENSION> + HasErrorType,
+    LeafData: HasLeafType<DIMENSION> + HasErrorType,
     NodeId<LeafData::Leaf, DIMENSION>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
@@ -248,7 +243,7 @@ where
     LeafData::Leaf: Hash + Eq,
 {
     fn intern_non_leaf_node(
-        &'a self,
+        &self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         let level = NonZeroUsize::new(key.level + 1).unwrap();
@@ -267,7 +262,7 @@ where
         })
     }
     fn intern_leaf_node(
-        &'a self,
+        &self,
         key: Array<Self::Leaf, 2, DIMENSION>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         Ok(NodeAndLevel {
@@ -276,7 +271,7 @@ where
         })
     }
     fn get_node_key(
-        &'a self,
+        &self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> NodeOrLeaf<NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>, Array<Self::Leaf, 2, DIMENSION>>
     {
@@ -290,7 +285,7 @@ where
         }
     }
     fn get_non_leaf_node_next(
-        &'a self,
+        &self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Option<NodeAndLevel<Self::NodeId>> {
         assert_eq!(node.node.level(), node.level);
@@ -305,7 +300,7 @@ where
         }
     }
     fn fill_non_leaf_node_next(
-        &'a self,
+        &self,
         node: NodeAndLevel<Self::NodeId>,
         new_next: NodeAndLevel<Self::NodeId>,
     ) {
@@ -324,7 +319,7 @@ where
             }
         }
     }
-    fn get_empty_node(&'a self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
+    fn get_empty_node(&self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         let mut empty_nodes = self.empty_nodes.borrow_mut();
         if let Some(node) = empty_nodes.get(level).cloned() {
             return Ok(NodeAndLevel { node, level });
@@ -373,13 +368,13 @@ mod test {
         type Error = ();
     }
 
-    impl HasLeafType<'_, DIMENSION> for LeafData {
+    impl HasLeafType<DIMENSION> for LeafData {
         type Leaf = u8;
     }
 
-    impl<'a> LeafStep<'a, DIMENSION> for LeafData {
+    impl LeafStep<DIMENSION> for LeafData {
         fn leaf_step(
-            &'a self,
+            &self,
             neighborhood: crate::array::Array<Self::Leaf, 3, DIMENSION>,
         ) -> Result<Self::Leaf, Self::Error> {
             let mut sum = 0;
@@ -392,11 +387,11 @@ mod test {
         }
     }
 
-    type NodeId<'a> = <Simple<'a, LeafData, DIMENSION> as HasNodeType<'a, DIMENSION>>::NodeId;
+    type NodeId = <Simple<LeafData, DIMENSION> as HasNodeType<DIMENSION>>::NodeId;
 
-    fn get_leaf<'a>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
-        mut node: NodeAndLevel<NodeId<'a>>,
+    fn get_leaf(
+        hl: &Simple<LeafData, DIMENSION>,
+        mut node: NodeAndLevel<NodeId>,
         mut location: IndexVec<DIMENSION>,
     ) -> u8 {
         loop {
@@ -411,11 +406,7 @@ mod test {
         }
     }
 
-    fn dump_2d<'a>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
-        node: NodeAndLevel<NodeId<'a>>,
-        title: &str,
-    ) {
+    fn dump_2d(hl: &Simple<LeafData, DIMENSION>, node: NodeAndLevel<NodeId>, title: &str) {
         println!("{}:", title);
         let size = 2usize << node.level;
         for y in 0..size {
@@ -429,12 +420,12 @@ mod test {
         }
     }
 
-    fn build_2d_with_helper<'a>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
+    fn build_2d_with_helper(
+        hl: &Simple<LeafData, DIMENSION>,
         f: &mut impl FnMut(IndexVec<DIMENSION>) -> u8,
         outer_location: IndexVec<DIMENSION>,
         level: usize,
-    ) -> NodeAndLevel<NodeId<'a>> {
+    ) -> NodeAndLevel<NodeId> {
         if level == 0 {
             hl.intern_leaf_node(Array::build_array(|index| {
                 f(index + outer_location.map(|v| v * 2))
@@ -452,18 +443,18 @@ mod test {
         }
     }
 
-    fn build_2d_with<'a>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
+    fn build_2d_with(
+        hl: &Simple<LeafData, DIMENSION>,
         mut f: impl FnMut(IndexVec<DIMENSION>) -> u8,
         level: usize,
-    ) -> NodeAndLevel<NodeId<'a>> {
+    ) -> NodeAndLevel<NodeId> {
         build_2d_with_helper(hl, &mut f, 0usize.into(), level)
     }
 
-    fn build_2d<'a, const SIZE: usize>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
+    fn build_2d<const SIZE: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
         array: [[u8; SIZE]; SIZE],
-    ) -> NodeAndLevel<NodeId<'a>> {
+    ) -> NodeAndLevel<NodeId> {
         assert!(SIZE.is_power_of_two());
         assert_ne!(SIZE, 1);
         let log2_size = SIZE.trailing_zeros();
@@ -509,7 +500,7 @@ mod test {
         );
     }
 
-    fn make_step0<'a>(hl: &'a Simple<'a, LeafData, DIMENSION>) -> NodeAndLevel<NodeId<'a>> {
+    fn make_step0(hl: &Simple<LeafData, DIMENSION>) -> NodeAndLevel<NodeId> {
         build_2d(
             hl,
             [
@@ -533,7 +524,7 @@ mod test {
         )
     }
 
-    fn make_step80<'a>(hl: &'a Simple<'a, LeafData, DIMENSION>) -> NodeAndLevel<NodeId<'a>> {
+    fn make_step80(hl: &Simple<LeafData, DIMENSION>) -> NodeAndLevel<NodeId> {
         build_2d(
             hl,
             [

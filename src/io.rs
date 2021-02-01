@@ -263,12 +263,12 @@ impl<R: BufRead> MacrocellReader<R> {
             },
         })
     }
-    pub fn read_body<'a, HL, const DIMENSION: usize>(
+    pub fn read_body<HL, const DIMENSION: usize>(
         self,
-        hash_life: &'a HL,
+        hash_life: &HL,
     ) -> Result<NodeAndLevel<HL::NodeId>, HL::Error>
     where
-        HL: HashlifeData<'a, DIMENSION>,
+        HL: HashlifeData<DIMENSION>,
         HL::Error: From<io::Error>,
         IndexVec<DIMENSION>: IndexVecExt,
         Array<HL::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -531,13 +531,13 @@ impl<W: Write> MacrocellWriter<W> {
     pub fn with_header(writer: W, header: MacrocellHeader) -> Self {
         Self { writer, header }
     }
-    pub fn write<'a, HL, const DIMENSION: usize>(
+    pub fn write<HL, const DIMENSION: usize>(
         self,
-        hash_life: &'a HL,
+        hash_life: &HL,
         root_node: NodeAndLevel<HL::NodeId>,
     ) -> Result<(), HL::Error>
     where
-        HL: HashlifeData<'a, DIMENSION>,
+        HL: HashlifeData<DIMENSION>,
         HL::Error: From<io::Error>,
         IndexVec<DIMENSION>: IndexVecExt,
         Array<HL::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -555,13 +555,13 @@ impl<W: Write> MacrocellWriter<W> {
         for level in 0..=root_node.level {
             nodes_map.insert(hash_life.get_empty_node(level)?.node, 0);
         }
-        fn get_nodes<'a, HL, const DIMENSION: usize>(
-            hash_life: &'a HL,
+        fn get_nodes<HL, const DIMENSION: usize>(
+            hash_life: &HL,
             node: NodeAndLevel<HL::NodeId>,
             nodes: &mut Vec<NodeAndLevel<HL::NodeId>>,
             nodes_map: &mut HashMap<HL::NodeId, usize>,
         ) where
-            HL: HashlifeData<'a, DIMENSION>,
+            HL: HashlifeData<DIMENSION>,
             IndexVec<DIMENSION>: IndexVecExt,
             Array<HL::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
             Array<HL::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -695,7 +695,7 @@ mod test {
 
     type Leaf = Option<u8>;
 
-    impl<const DIMENSION: usize> HasLeafType<'_, DIMENSION> for LeafData
+    impl<const DIMENSION: usize> HasLeafType<DIMENSION> for LeafData
     where
         Leaf: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
         Array<Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
@@ -705,8 +705,8 @@ mod test {
 
     type NodeId<const DIMENSION: usize> = crate::simple::NodeId<Leaf, DIMENSION>;
 
-    fn get_leaf<'a, const DIMENSION: usize>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
+    fn get_leaf<const DIMENSION: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
         mut node: NodeAndLevel<NodeId<DIMENSION>>,
         mut location: IndexVec<DIMENSION>,
     ) -> Leaf
@@ -729,7 +729,7 @@ mod test {
         }
     }
 
-    fn dump_2d<'a>(hl: &'a Simple<'a, LeafData, 2>, node: NodeAndLevel<NodeId<2>>, title: &str) {
+    fn dump_2d<'a>(hl: &Simple<LeafData, 2>, node: NodeAndLevel<NodeId<2>>, title: &str) {
         println!("{}:", title);
         let size = 2usize << node.level;
         for y in 0..size {
@@ -743,7 +743,7 @@ mod test {
         }
     }
 
-    fn dump_1d<'a>(hl: &'a Simple<'a, LeafData, 1>, node: NodeAndLevel<NodeId<1>>, title: &str) {
+    fn dump_1d<'a>(hl: &Simple<LeafData, 1>, node: NodeAndLevel<NodeId<1>>, title: &str) {
         println!("{}:", title);
         let size = 2usize << node.level;
         for x in 0..size {
@@ -755,8 +755,8 @@ mod test {
         println!();
     }
 
-    fn build_with_helper<'a, const DIMENSION: usize>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
+    fn build_with_helper<const DIMENSION: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
         f: &mut impl FnMut(IndexVec<DIMENSION>) -> Leaf,
         outer_location: IndexVec<DIMENSION>,
         level: usize,
@@ -785,8 +785,8 @@ mod test {
         }
     }
 
-    fn build_with<'a, const DIMENSION: usize>(
-        hl: &'a Simple<'a, LeafData, DIMENSION>,
+    fn build_with<const DIMENSION: usize>(
+        hl: &Simple<LeafData, DIMENSION>,
         mut f: impl FnMut(IndexVec<DIMENSION>) -> Leaf,
         level: usize,
     ) -> NodeAndLevel<NodeId<DIMENSION>>
@@ -800,8 +800,8 @@ mod test {
         build_with_helper(hl, &mut f, 0usize.into(), level)
     }
 
-    fn build_2d<'a, const SIZE: usize>(
-        hl: &'a Simple<'a, LeafData, 2>,
+    fn build_2d<const SIZE: usize>(
+        hl: &Simple<LeafData, 2>,
         array: [[Leaf; SIZE]; SIZE],
     ) -> NodeAndLevel<NodeId<2>> {
         assert!(SIZE.is_power_of_two());
@@ -812,8 +812,8 @@ mod test {
         build_with(hl, |index| array[index], level)
     }
 
-    fn build_1d<'a, const SIZE: usize>(
-        hl: &'a Simple<'a, LeafData, 1>,
+    fn build_1d<const SIZE: usize>(
+        hl: &Simple<LeafData, 1>,
         array: [Leaf; SIZE],
     ) -> NodeAndLevel<NodeId<1>> {
         assert!(SIZE.is_power_of_two());
@@ -860,11 +860,10 @@ mod test {
         Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
         IndexVec<DIMENSION>: IndexVecExt,
         Build: for<'a> FnOnce(
-            &'a Simple<'a, LeafData, DIMENSION>,
+            &Simple<LeafData, DIMENSION>,
             BuildIn,
         ) -> NodeAndLevel<NodeId<DIMENSION>>,
-        Dump:
-            for<'a> Fn(&'a Simple<'a, LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
+        Dump: for<'a> Fn(&Simple<LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
     {
         let hl = Simple::new(LeafData);
         let node = build(&hl, array);
@@ -898,11 +897,10 @@ mod test {
         Array<NodeId<DIMENSION>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
         IndexVec<DIMENSION>: IndexVecExt,
         Build: for<'a> FnOnce(
-            &'a Simple<'a, LeafData, DIMENSION>,
+            &Simple<LeafData, DIMENSION>,
             BuildIn,
         ) -> NodeAndLevel<NodeId<DIMENSION>>,
-        Dump:
-            for<'a> Fn(&'a Simple<'a, LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
+        Dump: for<'a> Fn(&Simple<LeafData, DIMENSION>, NodeAndLevel<NodeId<DIMENSION>>, &str),
     {
         let hl = Simple::new(LeafData);
         let text = lines.join("\n") + "\n";

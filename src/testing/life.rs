@@ -4,10 +4,10 @@ use crate::{
     traits::{HasErrorType, HasLeafType, LeafStep},
 };
 
-const DIMENSION: usize = 2;
-struct LeafData;
+pub const DIMENSION: usize = 2;
+pub struct LeafData;
 
-impl HasLeafType<'_, DIMENSION> for LeafData {
+impl HasLeafType<DIMENSION> for LeafData {
     type Leaf = u8;
 }
 
@@ -15,7 +15,7 @@ impl HasErrorType for LeafData {
     type Error = std::io::Error;
 }
 
-impl LeafStep<'_, DIMENSION> for LeafData {
+impl LeafStep<DIMENSION> for LeafData {
     fn leaf_step(
         &self,
         neighborhood: Array<Self::Leaf, 3, DIMENSION>,
