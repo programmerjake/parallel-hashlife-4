@@ -19,3 +19,6 @@ rayon = { optional = true, version = "1.5.0" }
 crossbeam-utils = { version = "0.8.1", default-features = false, features = [] }
 serde_json = { optional = true, version = "1.0.59" }
 serde = { optional = true, version = "1.0.117" }
+
+[profile.bench]
+debug = true

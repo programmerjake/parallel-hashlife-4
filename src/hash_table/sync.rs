@@ -73,40 +73,14 @@ impl IndexCell for AtomicUsize {
     }
 }
 
-unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
-    type FullState = NonZeroU32;
-
-    type StateCell = AtomicU32;
-
-    type IndexCell = AtomicUsize;
-
-    const STATE_CELL_EMPTY: Self::StateCell = AtomicU32::new(STATE_EMPTY);
-
-    fn make_full_state(hash: u64) -> Self::FullState {
-        super::make_full_state::<STATE_FIRST_FULL>(hash)
-    }
-
-    fn read_state(state_cell: &Self::StateCell) -> Option<Self::FullState> {
-        let retval = state_cell.load(Ordering::Acquire);
-        if retval >= STATE_FIRST_FULL {
-            Some(NonZeroU32::new(retval).unwrap())
-        } else {
-            None
-        }
-    }
-
-    fn read_state_nonatomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
-        let retval = *state_cell.get_mut();
-        if retval >= STATE_FIRST_FULL {
-            Some(NonZeroU32::new(retval).unwrap())
-        } else {
-            None
-        }
-    }
-
-    unsafe fn lock_state(&self, state_cell: &Self::StateCell) -> Result<(), Self::FullState> {
+impl<W: WaitWake> SyncHashTableImpl<W> {
+    #[cold]
+    unsafe fn lock_state_slow(
+        &self,
+        state_cell: &<Self as HashTableImpl>::StateCell,
+        mut state: u32,
+    ) -> Result<(), <Self as HashTableImpl>::FullState> {
         let mut spin_count = 0;
-        let mut state = state_cell.load(Ordering::Acquire);
         loop {
             if state >= STATE_FIRST_FULL {
                 return Err(NonZeroU32::new(state).unwrap());
@@ -140,6 +114,61 @@ unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
             );
         }
     }
+    #[cold]
+    unsafe fn unlock_state_slow(&self, state_cell: &<Self as HashTableImpl>::StateCell) {
+        self.wait_waker
+            .wake_all(NonZeroUsize::new_unchecked(state_cell as *const _ as usize));
+    }
+}
+
+unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
+    type FullState = NonZeroU32;
+
+    type StateCell = AtomicU32;
+
+    type IndexCell = AtomicUsize;
+
+    const STATE_CELL_EMPTY: Self::StateCell = AtomicU32::new(STATE_EMPTY);
+
+    fn make_full_state(hash: u64) -> Self::FullState {
+        super::make_full_state::<STATE_FIRST_FULL>(hash)
+    }
+
+    fn read_state(state_cell: &Self::StateCell) -> Option<Self::FullState> {
+        let retval = state_cell.load(Ordering::Acquire);
+        if retval >= STATE_FIRST_FULL {
+            Some(NonZeroU32::new(retval).unwrap())
+        } else {
+            None
+        }
+    }
+
+    fn read_state_nonatomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
+        let retval = *state_cell.get_mut();
+        if retval >= STATE_FIRST_FULL {
+            Some(NonZeroU32::new(retval).unwrap())
+        } else {
+            None
+        }
+    }
+
+    unsafe fn lock_state(&self, state_cell: &Self::StateCell) -> Result<(), Self::FullState> {
+        let state = state_cell.load(Ordering::Acquire);
+        if state >= STATE_FIRST_FULL {
+            Err(NonZeroU32::new(state).unwrap())
+        } else if state != STATE_EMPTY {
+            self.lock_state_slow(state_cell, state)
+        } else if let Err(state) = state_cell.compare_exchange_weak(
+            state,
+            STATE_LOCKED,
+            Ordering::Acquire,
+            Ordering::Acquire,
+        ) {
+            self.lock_state_slow(state_cell, state)
+        } else {
+            Ok(())
+        }
+    }
 
     unsafe fn unlock_and_fill_state(
         &self,
@@ -149,8 +178,7 @@ unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
         debug_assert!(full_state.get() >= STATE_FIRST_FULL);
         let state = state_cell.swap(full_state.get(), Ordering::Release);
         if state == STATE_LOCKED_WAITERS {
-            self.wait_waker
-                .wake_all(NonZeroUsize::new_unchecked(state_cell as *const _ as usize));
+            self.unlock_state_slow(state_cell);
         } else {
             debug_assert_eq!(state, STATE_LOCKED);
         }
@@ -159,8 +187,7 @@ unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
     unsafe fn unlock_and_empty_state(&self, state_cell: &Self::StateCell) {
         let state = state_cell.swap(STATE_EMPTY, Ordering::Release);
         if state == STATE_LOCKED_WAITERS {
-            self.wait_waker
-                .wake_all(NonZeroUsize::new_unchecked(state_cell as *const _ as usize));
+            self.unlock_state_slow(state_cell);
         } else {
             debug_assert_eq!(state, STATE_LOCKED);
         }
