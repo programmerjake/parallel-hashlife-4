@@ -48,26 +48,32 @@ pub struct SyncHashTableImpl<W: WaitWake> {
 impl IndexCell for AtomicUsize {
     const ZERO: Self = AtomicUsize::new(0);
 
+    #[inline(always)]
     fn get_mut(&mut self) -> &mut usize {
         self.get_mut()
     }
 
+    #[inline(always)]
     fn get(&self) -> usize {
         self.load(Ordering::Acquire)
     }
 
+    #[inline(always)]
     fn replace(&self, v: usize) -> usize {
         self.swap(v, Ordering::AcqRel)
     }
 
+    #[inline(always)]
     fn new(v: usize) -> Self {
         AtomicUsize::new(v)
     }
 
+    #[inline(always)]
     fn into_inner(self) -> usize {
         self.into_inner()
     }
 
+    #[inline(always)]
     fn set(&self, v: usize) {
         self.store(v, Ordering::Release)
     }

@@ -13,6 +13,7 @@ pub unsafe trait ArrayRepr<const LENGTH: usize, const DIMENSION: usize>: Sized {
     type Repr;
     /// # Safety
     /// ptr must point to a valid instance of `Self::Repr`, it doesn't need to point to a mutable value
+    #[inline(always)]
     unsafe fn index_ptr_checked(ptr: *mut Self::Repr, index: IndexVec<DIMENSION>) -> *mut Self {
         for &i in &index.0 {
             assert!(i < LENGTH);
@@ -31,6 +32,7 @@ pub unsafe trait ArrayRepr<const LENGTH: usize, const DIMENSION: usize>: Sized {
 
 unsafe impl<T, const LENGTH: usize> ArrayRepr<LENGTH, 0> for T {
     type Repr = T;
+    #[inline(always)]
     unsafe fn index_ptr_unchecked(ptr: *mut Self::Repr, _index: IndexVec<0>) -> *mut Self {
         ptr
     }
@@ -55,6 +57,7 @@ macro_rules! impl_nonzero_dimension {
     ($DIMENSION:literal) => {
         unsafe impl<T, const LENGTH: usize> ArrayRepr<LENGTH, $DIMENSION> for T {
             type Repr = [<T as ArrayRepr<LENGTH, { $DIMENSION - 1 }>>::Repr; LENGTH];
+            #[inline(always)]
             unsafe fn index_ptr_unchecked(
                 ptr: *mut Self::Repr,
                 index: IndexVec<$DIMENSION>,
@@ -114,11 +117,21 @@ where
     T: Clone,
     IndexVec<DIMENSION>: IndexVecExt,
 {
+    #[inline(always)]
     fn clone(&self) -> Self {
-        Array::build_array(|index| self[index].clone())
+        Array::build_array(
+            #[inline(always)]
+            |index| self[index].clone(),
+        )
     }
+    #[inline(always)]
     fn clone_from(&mut self, source: &Self) {
-        IndexVec::for_each_index(|index| self[index].clone_from(&source[index]), LENGTH, ..);
+        IndexVec::for_each_index(
+            #[inline(always)]
+            |index| self[index].clone_from(&source[index]),
+            LENGTH,
+            ..,
+        );
     }
 }
 
@@ -143,8 +156,12 @@ where
     T: Default,
     IndexVec<DIMENSION>: IndexVecExt,
 {
+    #[inline]
     fn default() -> Self {
-        Array::build_array(|_| T::default())
+        Array::build_array(
+            #[inline(always)]
+            |_| T::default(),
+        )
     }
 }
 
@@ -156,8 +173,10 @@ where
     T: PartialEq<Other>,
     IndexVec<DIMENSION>: IndexVecExt,
 {
+    #[inline(always)]
     fn eq(&self, other: &Array<Other, LENGTH, DIMENSION>) -> bool {
         IndexVec::try_for_each_index(
+            #[inline(always)]
             |index| {
                 if self[index] == other[index] {
                     Ok(())
@@ -178,8 +197,14 @@ where
     T: Hash,
     IndexVec<DIMENSION>: IndexVecExt,
 {
+    #[inline(always)]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        IndexVec::for_each_index(|index| self[index].hash(state), LENGTH, ..)
+        IndexVec::for_each_index(
+            #[inline(always)]
+            |index| self[index].hash(state),
+            LENGTH,
+            ..,
+        )
     }
 }
 
@@ -197,6 +222,7 @@ where
     T: ArrayRepr<LENGTH, DIMENSION>,
 {
     type Output = T;
+    #[inline(always)]
     fn index(&self, index: IndexVec<DIMENSION>) -> &Self::Output {
         unsafe {
             &*<T as ArrayRepr<LENGTH, DIMENSION>>::index_ptr_checked(
@@ -212,6 +238,7 @@ impl<T, const LENGTH: usize, const DIMENSION: usize> IndexMut<IndexVec<DIMENSION
 where
     T: ArrayRepr<LENGTH, DIMENSION>,
 {
+    #[inline(always)]
     fn index_mut(&mut self, index: IndexVec<DIMENSION>) -> &mut Self::Output {
         unsafe { &mut *<T as ArrayRepr<LENGTH, DIMENSION>>::index_ptr_checked(&mut self.0, index) }
     }
@@ -256,6 +283,7 @@ where
     T: ArrayRepr<LENGTH, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
 {
+    #[inline(always)]
     pub fn try_build_array<E, F: FnMut(IndexVec<DIMENSION>) -> Result<T, E>>(
         mut f: F,
     ) -> Result<Self, E> {
@@ -263,14 +291,20 @@ where
             let mut array = MaybeUninit::<T::Repr>::uninit();
             let array_ptr = array.as_mut_ptr();
             IndexVec::<DIMENSION>::try_for_each_index(
+                #[inline(always)]
                 |index| -> Result<(), E> {
-                    let handle_failure = CallOnDrop(|| {
-                        IndexVec::<DIMENSION>::for_each_index(
-                            |index| ptr::drop_in_place(T::index_ptr_unchecked(array_ptr, index)),
-                            LENGTH,
-                            ..index,
-                        )
-                    });
+                    let handle_failure = CallOnDrop(
+                        #[cold]
+                        || {
+                            IndexVec::<DIMENSION>::for_each_index(
+                                |index| {
+                                    ptr::drop_in_place(T::index_ptr_unchecked(array_ptr, index))
+                                },
+                                LENGTH,
+                                ..index,
+                            )
+                        },
+                    );
                     let value = f(index)?;
                     let _ = handle_failure.cancel();
                     T::index_ptr_unchecked(array_ptr, index).write(value);
@@ -282,7 +316,12 @@ where
             Ok(Self(array.assume_init()))
         }
     }
+    #[inline(always)]
     pub fn build_array<F: FnMut(IndexVec<DIMENSION>) -> T>(mut f: F) -> Self {
-        Self::try_build_array::<(), _>(|index| Ok(f(index))).unwrap()
+        Self::try_build_array::<(), _>(
+            #[inline(always)]
+            |index| Ok(f(index)),
+        )
+        .unwrap()
     }
 }

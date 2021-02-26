@@ -34,6 +34,7 @@ where
     T: ArrayRepr<LENGTH, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
 {
+    #[inline(always)]
     fn parallel_build_array<F: Fn(IndexVec<DIMENSION>) -> Result<T, Error>>(
         &self,
         f: F,

@@ -461,12 +461,15 @@ unsafe impl IndexVecExt for IndexVec<1> {}
 
 unsafe impl IndexVecNonzeroDimension for IndexVec<1> {
     type PrevDimension = IndexVec<0>;
+    #[inline(always)]
     fn first(self) -> usize {
         self.0[0]
     }
+    #[inline(always)]
     fn rest(self) -> Self::PrevDimension {
         IndexVec([])
     }
+    #[inline(always)]
     fn combine(first: usize, _rest: Self::PrevDimension) -> Self {
         Self([first])
     }
@@ -475,6 +478,7 @@ unsafe impl IndexVecNonzeroDimension for IndexVec<1> {
 macro_rules! impl_dimension_more_than_1 {
     ($Dimension:literal) => {
         unsafe impl<RangeT: RangeBounds<Self>> IndexVecForEach<RangeT> for IndexVec<$Dimension> {
+            #[inline(always)]
             fn try_for_each_index<E, F: FnMut(Self) -> Result<(), E>>(
                 f: F,
                 length: usize,
@@ -482,6 +486,7 @@ macro_rules! impl_dimension_more_than_1 {
             ) -> Result<(), E> {
                 ForEachIndexHelper::<$Dimension>::new(length, range).try_for_each(f)
             }
+            #[inline(always)]
             fn for_each_index<F: FnMut(Self)>(f: F, length: usize, range: RangeT) {
                 ForEachIndexHelper::<$Dimension>::new(length, range).for_each(f)
             }
@@ -491,9 +496,11 @@ macro_rules! impl_dimension_more_than_1 {
 
         unsafe impl IndexVecNonzeroDimension for IndexVec<$Dimension> {
             type PrevDimension = IndexVec<{ $Dimension - 1 }>;
+            #[inline(always)]
             fn first(self) -> usize {
                 self.0[0]
             }
+            #[inline(always)]
             fn rest(self) -> Self::PrevDimension {
                 let mut retval = [0; $Dimension - 1];
                 for i in 1..$Dimension {
@@ -501,6 +508,7 @@ macro_rules! impl_dimension_more_than_1 {
                 }
                 IndexVec(retval)
             }
+            #[inline(always)]
             fn combine(first: usize, rest: Self::PrevDimension) -> Self {
                 let mut retval = [0; $Dimension];
                 retval[0] = first;

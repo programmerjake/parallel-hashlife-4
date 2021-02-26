@@ -1,6 +1,6 @@
 use crate::{
     array::{Array, ArrayRepr},
-    hash_table::{HashTable, HashTableImpl, IndexCell, LockResult, NotEnoughSpace},
+    hash_table::{HashTable, HashTableImpl, IndexCell, NotEnoughSpace},
     index_vec::{IndexVec, IndexVecExt, IndexVecForEach},
     traits::{
         parallel::ParallelBuildArray, HasErrorType, HasLeafType, HasNodeType, HashlifeData,
@@ -31,6 +31,7 @@ pub struct NodeId {
 }
 
 impl NodeId {
+    #[inline]
     fn index(self) -> usize {
         self.index_plus_1.get() - 1
     }
@@ -295,25 +296,27 @@ where
     LeafStepT::Error: From<NotEnoughSpace>,
     HTI: HashTableImpl,
 {
+    #[inline(always)]
     fn get_node_level(&self, node_id: NodeId) -> usize {
         match self.hash_table.index(node_id.index()).unwrap() {
             NodeOrLeaf::Node(v) => v.level.get().into(),
             NodeOrLeaf::Leaf(_) => 0,
         }
     }
+    #[inline(always)]
     fn intern_node(
         &self,
         node: Node<LeafStepT::Leaf, HTI::IndexCell, DIMENSION>,
     ) -> Result<NodeId, LeafStepT::Error> {
         let mut hasher = self.hasher.build_hasher();
         node.hash(&mut hasher);
-        let (index, lock_result) = self
-            .hash_table
-            .lock_entry(hasher.finish(), |_index, v| *v == node)?;
-        if let LockResult::Vacant(entry) = lock_result {
-            entry.fill(node);
-        }
-        Ok(NodeId::from_index(index))
+        let get_or_insert_output = self.hash_table.get_or_insert(
+            hasher.finish(),
+            #[inline(always)]
+            |_index, v, node| v == node,
+            node,
+        )?;
+        Ok(NodeId::from_index(get_or_insert_output.index))
     }
     #[cold]
     fn fill_empty_nodes(
@@ -358,6 +361,7 @@ where
     LeafStepT::Error: From<NotEnoughSpace>,
     HTI: HashTableImpl,
 {
+    #[inline(always)]
     fn intern_non_leaf_node(
         &self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
@@ -367,6 +371,7 @@ where
             .try_into()
             .unwrap();
         IndexVec::<DIMENSION>::for_each_index(
+            #[inline(always)]
             |index| assert_eq!(self.get_node_level(key.node[index]), key.level),
             2,
             ..,
@@ -380,6 +385,7 @@ where
             level: level.get().into(),
         })
     }
+    #[inline(always)]
     fn intern_leaf_node(
         &self,
         key: Array<Self::Leaf, 2, DIMENSION>,
@@ -389,6 +395,7 @@ where
             level: 0,
         })
     }
+    #[inline(always)]
     fn get_node_key(
         &self,
         node: NodeAndLevel<Self::NodeId>,
@@ -403,6 +410,7 @@ where
             NodeOrLeaf::Leaf(key) => NodeOrLeaf::Leaf(key.clone()),
         }
     }
+    #[inline(always)]
     fn get_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
@@ -416,6 +424,7 @@ where
             }),
         }
     }
+    #[inline(always)]
     fn fill_non_leaf_node_next(
         &self,
         node: NodeAndLevel<Self::NodeId>,
@@ -433,6 +442,7 @@ where
             }
         }
     }
+    #[inline(always)]
     fn get_empty_node(&self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
         if let Some(node) = self.empty_nodes[level].get() {
             Ok(NodeAndLevel { node, level })

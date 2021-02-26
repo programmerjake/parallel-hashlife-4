@@ -35,6 +35,12 @@ pub trait IndexCell: 'static + Debug + Sized {
     fn set(&self, v: usize);
 }
 
+#[derive(Debug)]
+pub struct TryFillStateFailed<FullState, T> {
+    pub read_state: FullState,
+    pub write_value: T,
+}
+
 pub unsafe trait HashTableImpl: sealed::Sealed {
     type FullState: 'static + Debug + Eq + Copy;
     type StateCell: 'static + Debug;
@@ -52,11 +58,31 @@ pub unsafe trait HashTableImpl: sealed::Sealed {
         full_state: Self::FullState,
     );
     unsafe fn unlock_and_empty_state(&self, state_cell: &Self::StateCell);
+    unsafe fn try_fill_state<T>(
+        &self,
+        state_cell: &Self::StateCell,
+        new_full_state: Self::FullState,
+        write_target: NonNull<T>,
+        write_value: T,
+    ) -> Result<(), TryFillStateFailed<Self::FullState, T>> {
+        match self.lock_state(state_cell) {
+            Ok(()) => {
+                write_target.as_ptr().write(write_value);
+                self.unlock_and_fill_state(state_cell, new_full_state);
+                Ok(())
+            }
+            Err(read_state) => Err(TryFillStateFailed {
+                read_state,
+                write_value,
+            }),
+        }
+    }
 }
 
 const STATE_EMPTY: u32 = 0;
 const STATE_LOCKED: u32 = STATE_EMPTY + 1;
 
+#[inline(always)]
 fn make_full_state<const STATE_FIRST_FULL: u32>(hash: u64) -> NonZeroU32 {
     let retval = (hash >> 32) as u32;
     if retval >= STATE_FIRST_FULL {
@@ -396,6 +422,13 @@ impl fmt::Display for NotEnoughSpace {
     }
 }
 
+#[derive(Debug)]
+pub struct GetOrInsertOutput<'a, Value> {
+    pub index: usize,
+    pub value: &'a Value,
+    pub uninserted_value: Option<Value>,
+}
+
 impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
     pub fn find<'a, F: FnMut(usize, &'a Value) -> bool>(
         &'a self,
@@ -417,6 +450,50 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
             }
         }
         None
+    }
+    #[inline]
+    pub fn get_or_insert<'a, F: FnMut(usize, &'a Value, &Value) -> bool>(
+        &'a self,
+        hash: u64,
+        mut entry_eq: F,
+        mut new_value: Value,
+    ) -> Result<GetOrInsertOutput<'a, Value>, NotEnoughSpace> {
+        let full_state = HTI::make_full_state(hash);
+        for (index, state_cell, value) in self.probe_sequence(hash) {
+            unsafe {
+                match self.hash_table_impl.try_fill_state(
+                    state_cell,
+                    full_state,
+                    NonNull::new_unchecked(value.get() as *mut Value),
+                    new_value,
+                ) {
+                    Ok(()) => {
+                        return Ok(GetOrInsertOutput {
+                            index,
+                            value: &*(value.get() as *const Value),
+                            uninserted_value: None,
+                        });
+                    }
+                    Err(TryFillStateFailed {
+                        read_state,
+                        write_value,
+                    }) => {
+                        new_value = write_value;
+                        if read_state == full_state {
+                            let value = &*(value.get() as *const Value);
+                            if entry_eq(index, value, &new_value) {
+                                return Ok(GetOrInsertOutput {
+                                    index,
+                                    value,
+                                    uninserted_value: Some(new_value),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(NotEnoughSpace)
     }
     pub fn lock_entry<'a, F: FnMut(usize, &'a Value) -> bool>(
         &'a self,
@@ -719,7 +796,7 @@ impl<'a, HTI: HashTableImpl, Value> IntoIterator for &'a mut HashTable<HTI, Valu
 mod test {
     use super::{
         sync::{self, WaitWake},
-        unsync, LockResult,
+        unsync, GetOrInsertOutput, LockResult,
     };
     use crate::std_support::StdWaitWake;
     use alloc::{sync::Arc, vec::Vec};
@@ -863,32 +940,67 @@ mod test {
         };
         let mut reference_ht = HashSet::<Entry>::new();
         for i in 0..100000u64 {
-            if i.wrapping_mul(0xA331_ABB2_E016_BC0A_u64) >> 63 != 0 {
-                let entry = Entry::new();
-                match ht.lock_entry(hasher(&entry), |_index, v| *v == entry) {
-                    Ok((_index, LockResult::Vacant(locked_entry))) => {
-                        assert_eq!(*locked_entry.fill(entry.clone()), entry);
-                        assert!(
-                            reference_ht.insert(entry.clone()),
-                            "failed to insert {:?}",
-                            entry
-                        );
-                    }
-                    Ok((_index, LockResult::Full(old_entry))) => {
-                        assert_eq!(reference_ht.get(&entry), Some(old_entry));
-                    }
-                    Err(super::NotEnoughSpace) => {
-                        assert!(reference_ht.len() >= ht.probe_distance());
+            match i.wrapping_mul(0xA331_ABB2_E016_BC0A_u64) >> 62 {
+                1 => {
+                    let entry = Entry::new();
+                    match ht.lock_entry(hasher(&entry), |_index, v| *v == entry) {
+                        Ok((_index, LockResult::Vacant(locked_entry))) => {
+                            assert_eq!(*locked_entry.fill(entry.clone()), entry);
+                            assert!(
+                                reference_ht.insert(entry.clone()),
+                                "failed to insert {:?}",
+                                entry
+                            );
+                        }
+                        Ok((_index, LockResult::Full(old_entry))) => {
+                            assert_eq!(reference_ht.get(&entry), Some(old_entry));
+                        }
+                        Err(super::NotEnoughSpace) => {
+                            assert!(reference_ht.len() >= ht.probe_distance());
+                        }
                     }
                 }
-            } else {
-                for _ in 0..10 {
+                2 => {
                     let entry = Entry::new();
-                    assert_eq!(
-                        ht.find(hasher(&entry), |_index, v| *v == entry)
-                            .map(|v| v.1),
-                        reference_ht.get(&entry)
-                    );
+                    match ht.get_or_insert(
+                        hasher(&entry),
+                        |_index, v, entry| v == entry,
+                        entry.clone(),
+                    ) {
+                        Ok(GetOrInsertOutput {
+                            index: _,
+                            value: filled_entry,
+                            uninserted_value: None,
+                        }) => {
+                            assert_eq!(*filled_entry, entry);
+                            assert!(
+                                reference_ht.insert(entry.clone()),
+                                "failed to insert {:?}",
+                                entry
+                            );
+                        }
+                        Ok(GetOrInsertOutput {
+                            index: _,
+                            value: old_entry,
+                            uninserted_value: Some(new_entry),
+                        }) => {
+                            assert_eq!(reference_ht.get(&entry), Some(old_entry));
+                            assert_eq!(entry, new_entry);
+                        }
+                        Err(super::NotEnoughSpace) => {
+                            assert!(reference_ht.len() >= ht.probe_distance());
+                        }
+                    }
+                }
+                _ => {
+                    for _ in 0..10 {
+                        let entry = Entry::new();
+                        assert_eq!(
+                            ht.find(hasher(&entry), |_index, v| *v == entry)
+                                .map(|v| v.1),
+                            reference_ht.get(&entry)
+                        );
+                    }
                 }
             }
         }
