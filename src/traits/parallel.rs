@@ -11,7 +11,7 @@ use super::LeafStep;
 #[path = "hashlife_impl.rs"]
 mod hashlife_impl;
 
-pub trait ParallelBuildArray<T, Error, const LENGTH: usize, const DIMENSION: usize>
+pub unsafe trait ParallelBuildArray<T, Error, const LENGTH: usize, const DIMENSION: usize>
 where
     T: ArrayRepr<LENGTH, DIMENSION> + Send,
     IndexVec<DIMENSION>: IndexVecExt,
@@ -23,7 +23,7 @@ where
     ) -> Result<Array<T, LENGTH, DIMENSION>, Error>;
 }
 
-impl<T, Error, This, const LENGTH: usize, const DIMENSION: usize>
+unsafe impl<T, Error, This, const LENGTH: usize, const DIMENSION: usize>
     ParallelBuildArray<T, Error, LENGTH, DIMENSION> for &'_ This
 where
     This: ?Sized + ParallelBuildArray<T, Error, LENGTH, DIMENSION>,

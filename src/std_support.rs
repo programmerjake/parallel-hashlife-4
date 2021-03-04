@@ -171,7 +171,7 @@ where
     }
 }
 
-impl<T, Error, const LENGTH: usize, const DIMENSION: usize>
+unsafe impl<T, Error, const LENGTH: usize, const DIMENSION: usize>
     ParallelBuildArray<T, Error, LENGTH, DIMENSION> for RayonParallel
 where
     T: ArrayRepr<LENGTH, DIMENSION> + Send,

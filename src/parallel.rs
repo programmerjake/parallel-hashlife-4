@@ -263,7 +263,7 @@ where
     }
 }
 
-impl<T, LeafStepT, ArrayBuilder, HTI, const LENGTH: usize, const DIMENSION: usize>
+unsafe impl<T, LeafStepT, ArrayBuilder, HTI, const LENGTH: usize, const DIMENSION: usize>
     ParallelBuildArray<T, LeafStepT::Error, LENGTH, DIMENSION>
     for Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where

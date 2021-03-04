@@ -16,7 +16,7 @@ mod send_sync {
 
 use send_sync::{Everything as TheSend, Everything as TheSync};
 
-trait ParallelBuildArray<T, Error, const LENGTH: usize, const DIMENSION: usize>
+unsafe trait ParallelBuildArray<T, Error, const LENGTH: usize, const DIMENSION: usize>
 where
     T: ArrayRepr<LENGTH, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
@@ -27,7 +27,7 @@ where
     ) -> Result<Array<T, LENGTH, DIMENSION>, Error>;
 }
 
-impl<This, T, Error, const LENGTH: usize, const DIMENSION: usize>
+unsafe impl<This, T, Error, const LENGTH: usize, const DIMENSION: usize>
     ParallelBuildArray<T, Error, LENGTH, DIMENSION> for This
 where
     This: ?Sized,

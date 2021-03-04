@@ -1,5 +1,6 @@
 use crate::index_vec::{IndexVec, IndexVecExt, IndexVecForEach, IndexVecNonzeroDimension};
 use core::{
+    convert::Infallible,
     fmt,
     hash::{Hash, Hasher},
     mem::{self, MaybeUninit},
@@ -13,13 +14,7 @@ pub unsafe trait ArrayRepr<const LENGTH: usize, const DIMENSION: usize>: Sized {
     type Repr;
     /// # Safety
     /// ptr must point to a valid instance of `Self::Repr`, it doesn't need to point to a mutable value
-    #[inline(always)]
-    unsafe fn index_ptr_checked(ptr: *mut Self::Repr, index: IndexVec<DIMENSION>) -> *mut Self {
-        for &i in &index.0 {
-            assert!(i < LENGTH);
-        }
-        Self::index_ptr_unchecked(ptr, index)
-    }
+    unsafe fn index_ptr_checked(ptr: *mut Self::Repr, index: IndexVec<DIMENSION>) -> *mut Self;
     /// # Safety
     /// ptr must point to a valid instance of `Self::Repr` and index must be in-bounds, ptr doesn't need to point to a mutable value
     unsafe fn index_ptr_unchecked(ptr: *mut Self::Repr, index: IndexVec<DIMENSION>) -> *mut Self;
@@ -32,6 +27,10 @@ pub unsafe trait ArrayRepr<const LENGTH: usize, const DIMENSION: usize>: Sized {
 
 unsafe impl<T, const LENGTH: usize> ArrayRepr<LENGTH, 0> for T {
     type Repr = T;
+    #[inline(always)]
+    unsafe fn index_ptr_checked(ptr: *mut Self::Repr, _index: IndexVec<0>) -> *mut Self {
+        ptr
+    }
     #[inline(always)]
     unsafe fn index_ptr_unchecked(ptr: *mut Self::Repr, _index: IndexVec<0>) -> *mut Self {
         ptr
@@ -58,11 +57,24 @@ macro_rules! impl_nonzero_dimension {
         unsafe impl<T, const LENGTH: usize> ArrayRepr<LENGTH, $DIMENSION> for T {
             type Repr = [<T as ArrayRepr<LENGTH, { $DIMENSION - 1 }>>::Repr; LENGTH];
             #[inline(always)]
+            unsafe fn index_ptr_checked(
+                ptr: *mut Self::Repr,
+                index: IndexVec<$DIMENSION>,
+            ) -> *mut Self {
+                let ptr = ptr as *mut <T as ArrayRepr<LENGTH, { $DIMENSION - 1 }>>::Repr;
+                assert!(index.first() < LENGTH);
+                <T as ArrayRepr<LENGTH, { $DIMENSION - 1 }>>::index_ptr_checked(
+                    ptr.offset(index.first() as isize),
+                    index.rest(),
+                )
+            }
+            #[inline(always)]
             unsafe fn index_ptr_unchecked(
                 ptr: *mut Self::Repr,
                 index: IndexVec<$DIMENSION>,
             ) -> *mut Self {
                 let ptr = ptr as *mut <T as ArrayRepr<LENGTH, { $DIMENSION - 1 }>>::Repr;
+                debug_assert!(index.first() < LENGTH);
                 <T as ArrayRepr<LENGTH, { $DIMENSION - 1 }>>::index_ptr_unchecked(
                     ptr.offset(index.first() as isize),
                     index.rest(),
@@ -121,14 +133,17 @@ where
     fn clone(&self) -> Self {
         Array::build_array(
             #[inline(always)]
-            |index| self[index].clone(),
+            |index| unsafe { self.get_unchecked(index).clone() },
         )
     }
     #[inline(always)]
     fn clone_from(&mut self, source: &Self) {
         IndexVec::for_each_index(
             #[inline(always)]
-            |index| self[index].clone_from(&source[index]),
+            |index| unsafe {
+                self.get_unchecked_mut(index)
+                    .clone_from(source.get_unchecked(index))
+            },
             LENGTH,
             ..,
         );
@@ -177,8 +192,8 @@ where
     fn eq(&self, other: &Array<Other, LENGTH, DIMENSION>) -> bool {
         IndexVec::try_for_each_index(
             #[inline(always)]
-            |index| {
-                if self[index] == other[index] {
+            |index| unsafe {
+                if self.get_unchecked(index) == other.get_unchecked(index) {
                     Ok(())
                 } else {
                     Err(())
@@ -201,7 +216,7 @@ where
     fn hash<H: Hasher>(&self, state: &mut H) {
         IndexVec::for_each_index(
             #[inline(always)]
-            |index| self[index].hash(state),
+            |index| unsafe { self.get_unchecked(index).hash(state) },
             LENGTH,
             ..,
         )
@@ -214,6 +229,23 @@ where
     T: Eq,
     IndexVec<DIMENSION>: IndexVecExt,
 {
+}
+
+impl<T, const LENGTH: usize, const DIMENSION: usize> Array<T, LENGTH, DIMENSION>
+where
+    T: ArrayRepr<LENGTH, DIMENSION>,
+{
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, index: IndexVec<DIMENSION>) -> &T {
+        &*<T as ArrayRepr<LENGTH, DIMENSION>>::index_ptr_unchecked(
+            &self.0 as *const T::Repr as *mut T::Repr,
+            index,
+        )
+    }
+    #[inline(always)]
+    pub unsafe fn get_unchecked_mut(&mut self, index: IndexVec<DIMENSION>) -> &mut T {
+        &mut *<T as ArrayRepr<LENGTH, DIMENSION>>::index_ptr_unchecked(&mut self.0, index)
+    }
 }
 
 impl<T, const LENGTH: usize, const DIMENSION: usize> Index<IndexVec<DIMENSION>>
@@ -318,7 +350,7 @@ where
     }
     #[inline(always)]
     pub fn build_array<F: FnMut(IndexVec<DIMENSION>) -> T>(mut f: F) -> Self {
-        Self::try_build_array::<(), _>(
+        Self::try_build_array::<Infallible, _>(
             #[inline(always)]
             |index| Ok(f(index)),
         )
