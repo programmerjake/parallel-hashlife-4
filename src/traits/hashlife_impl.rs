@@ -5,6 +5,7 @@ use crate::{
     NodeAndLevel,
 };
 
+#[inline]
 pub(crate) fn recursive_hashlife_compute_node_next<HL, const DIMENSION: usize>(
     hl: &HL,
     node: NodeAndLevel<HL::NodeId>,
@@ -20,6 +21,28 @@ where
     Array<HL::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
 {
     assert!(
+        node.level > log2_step_size,
+        "level too small to step with requested step size"
+    );
+    recursive_hashlife_compute_node_next_impl(hl, node, log2_step_size)
+}
+
+#[inline(never)]
+fn recursive_hashlife_compute_node_next_impl<HL, const DIMENSION: usize>(
+    hl: &HL,
+    node: NodeAndLevel<HL::NodeId>,
+    log2_step_size: usize,
+) -> Result<NodeAndLevel<HL::NodeId>, HL::Error>
+where
+    HL: Hashlife<DIMENSION> + ?Sized,
+    HL::Error: TheSend,
+    HL::NodeId: TheSend + TheSync,
+    HL::Leaf: TheSend,
+    IndexVec<DIMENSION>: IndexVecExt,
+    Array<HL::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    Array<HL::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+{
+    debug_assert!(
         node.level > log2_step_size,
         "level too small to step with requested step size"
     );
@@ -105,8 +128,7 @@ where
                             node: key,
                             level: node.level - 2,
                         })?;
-                        Ok(hl
-                            .recursive_hashlife_compute_node_next(temp, log2_step_size - 1)?
+                        Ok(recursive_hashlife_compute_node_next_impl(hl, temp, log2_step_size - 1)?
                             .node)
                     },
                 )?;
@@ -123,8 +145,7 @@ where
                             node: key,
                             level: node.level - 2,
                         })?;
-                        Ok(hl
-                            .recursive_hashlife_compute_node_next(temp, log2_step_size - 1)?
+                        Ok(recursive_hashlife_compute_node_next_impl(hl, temp, log2_step_size - 1)?
                             .node)
                     },
                 )?;
@@ -166,8 +187,7 @@ where
                             node: key,
                             level: node.level - 2,
                         })?;
-                        Ok(hl
-                            .recursive_hashlife_compute_node_next(temp, log2_step_size)?
+                        Ok(recursive_hashlife_compute_node_next_impl(hl, temp, log2_step_size)?
                             .node)
                     },
                 )?;

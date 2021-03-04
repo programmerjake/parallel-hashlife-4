@@ -4,7 +4,9 @@ use alloc::{
 };
 use core::{
     cell::UnsafeCell,
+    debug_assert,
     fmt::{self, Debug},
+    hint::unreachable_unchecked,
     iter::{self, FusedIterator},
     marker::PhantomData,
     mem::{self, MaybeUninit},
@@ -165,8 +167,12 @@ impl Drop for HashTableStorage {
 }
 
 impl HashTableStorage {
-    fn capacity(&self) -> usize {
-        self.internal.as_ref().unwrap().capacity
+    unsafe fn capacity(&self) -> usize {
+        debug_assert!(self.internal.is_some());
+        match &self.internal {
+            Some(v) => v.capacity,
+            None => unreachable_unchecked(),
+        }
     }
     unsafe fn drop_fn<HTI: HashTableImpl, Value>(internal: HashTableStorageInternal) {
         let (state_cells, values) =
@@ -199,10 +205,11 @@ impl HashTableStorage {
     unsafe fn state_cells_values<HTI: HashTableImpl, Value>(
         &self,
     ) -> (&[HTI::StateCell], &[UnsafeCell<MaybeUninit<Value>>]) {
-        self.internal
-            .as_ref()
-            .unwrap()
-            .as_ref::<HTI::StateCell, UnsafeCell<MaybeUninit<Value>>>()
+        debug_assert!(self.internal.is_some());
+        match &self.internal {
+            Some(v) => v.as_ref::<HTI::StateCell, UnsafeCell<MaybeUninit<Value>>>(),
+            None => unreachable_unchecked(),
+        }
     }
     unsafe fn state_cells_values_mut<HTI: HashTableImpl, Value>(
         &mut self,
@@ -296,7 +303,7 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
         }
     }
     pub fn capacity(&self) -> usize {
-        self.storage.capacity()
+        unsafe { self.storage.capacity() }
     }
     pub fn probe_distance(&self) -> usize {
         self.probe_distance
@@ -315,13 +322,20 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
     }
     pub fn index<'a>(&'a self, index: usize) -> Option<&'a Value> {
         unsafe {
-            let (state_cells, values) = self.storage.state_cells_values::<HTI, Value>();
-            let state_cell = state_cells.get(index)?;
-            if HTI::read_state(state_cell).is_some() {
-                Some(&*(values[index].get() as *const Value))
-            } else {
-                None
-            }
+            assert!(index < self.capacity());
+            self.index_unchecked(index)
+        }
+    }
+    /// # Safety
+    /// `index` must be less than `capacity`
+    pub unsafe fn index_unchecked<'a>(&'a self, index: usize) -> Option<&'a Value> {
+        debug_assert!(index < self.capacity());
+        let (state_cells, values) = self.storage.state_cells_values::<HTI, Value>();
+        let state_cell = state_cells.get_unchecked(index);
+        if HTI::read_state(state_cell).is_some() {
+            Some(&*(values[index].get() as *const Value))
+        } else {
+            None
         }
     }
     pub fn index_mut<'a>(&'a mut self, index: usize) -> Option<&'a mut Value> {
