@@ -20,7 +20,7 @@ fn step_test() {
         PATTERN,
         testing::wire_world::LeafData,
         20,
-        LOG2_STEP_SIZE,
+        Some(LOG2_STEP_SIZE),
         |hl, mut node| {
             let mut expected = MacrocellReader::new(EXPECTED_PATTERN.as_bytes())?.read_body(hl)?;
             while expected.level < node.level {

@@ -20,7 +20,7 @@ pub mod wire_world;
 pub fn run_serial_simple<LeafData, MapResult, R, const DIMENSION: usize>(
     macrocell_pattern: &str,
     leaf_data: LeafData,
-    log2_step_size: usize,
+    log2_step_size: Option<usize>,
     map_result: MapResult,
 ) -> Result<R, LeafData::Error>
 where
@@ -38,15 +38,17 @@ where
 {
     let hl = simple::Simple::new(leaf_data);
     let mut root = MacrocellReader::new(macrocell_pattern.as_bytes())?.read_body(&hl)?;
-    while root.level < log2_step_size {
+    if let Some(log2_step_size) = log2_step_size {
+        while root.level < log2_step_size {
+            root = hl.expand_root(root)?;
+        }
         root = hl.expand_root(root)?;
+        root = crate::traits::serial::Hashlife::recursive_hashlife_compute_node_next(
+            &hl,
+            root,
+            log2_step_size,
+        )?;
     }
-    root = hl.expand_root(root)?;
-    root = crate::traits::serial::Hashlife::recursive_hashlife_compute_node_next(
-        &hl,
-        root,
-        log2_step_size,
-    )?;
     map_result(&hl, root)
 }
 
@@ -54,7 +56,7 @@ pub fn run_serial<LeafData, MapResult, R, const DIMENSION: usize>(
     macrocell_pattern: &str,
     leaf_data: LeafData,
     log2_capacity: u32,
-    log2_step_size: usize,
+    log2_step_size: Option<usize>,
     map_result: MapResult,
 ) -> Result<R, LeafData::Error>
 where
@@ -73,15 +75,17 @@ where
     let hl =
         parallel::Parallel::with_hash_table_impl(leaf_data, (), log2_capacity, Default::default());
     let mut root = MacrocellReader::new(macrocell_pattern.as_bytes())?.read_body(&hl)?;
-    while root.level < log2_step_size {
+    if let Some(log2_step_size) = log2_step_size {
+        while root.level < log2_step_size {
+            root = hl.expand_root(root)?;
+        }
         root = hl.expand_root(root)?;
+        root = crate::traits::serial::Hashlife::recursive_hashlife_compute_node_next(
+            &hl,
+            root,
+            log2_step_size,
+        )?;
     }
-    root = hl.expand_root(root)?;
-    root = crate::traits::serial::Hashlife::recursive_hashlife_compute_node_next(
-        &hl,
-        root,
-        log2_step_size,
-    )?;
     map_result(&hl, root)
 }
 
@@ -89,7 +93,7 @@ pub fn run_parallel<LeafData, MapResult, R, const DIMENSION: usize>(
     macrocell_pattern: &str,
     leaf_data: LeafData,
     log2_capacity: u32,
-    log2_step_size: usize,
+    log2_step_size: Option<usize>,
     map_result: MapResult,
 ) -> Result<R, LeafData::Error>
 where
@@ -118,14 +122,16 @@ where
         Default::default(),
     );
     let mut root = MacrocellReader::new(macrocell_pattern.as_bytes())?.read_body(&hl)?;
-    while root.level < log2_step_size {
+    if let Some(log2_step_size) = log2_step_size {
+        while root.level < log2_step_size {
+            root = hl.expand_root(root)?;
+        }
         root = hl.expand_root(root)?;
+        root = crate::traits::parallel::Hashlife::recursive_hashlife_compute_node_next(
+            &hl,
+            root,
+            log2_step_size,
+        )?;
     }
-    root = hl.expand_root(root)?;
-    root = crate::traits::parallel::Hashlife::recursive_hashlife_compute_node_next(
-        &hl,
-        root,
-        log2_step_size,
-    )?;
     map_result(&hl, root)
 }
