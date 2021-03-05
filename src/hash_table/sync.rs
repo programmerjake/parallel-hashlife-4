@@ -1,7 +1,8 @@
-use super::{HashTableImpl, IndexCell, STATE_EMPTY, STATE_LOCKED};
+use super::{HashTableImpl, IndexCell, LockableHashTableImpl, TryFillStateFailed};
 use core::{
     hint::spin_loop,
     num::{NonZeroU32, NonZeroUsize},
+    ptr::NonNull,
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
@@ -30,6 +31,8 @@ impl<T: WaitWake> WaitWake for &'_ T {
     }
 }
 
+const STATE_EMPTY: u32 = 0;
+const STATE_LOCKED: u32 = STATE_EMPTY + 1;
 const STATE_LOCKED_WAITERS: u32 = STATE_LOCKED + 1;
 const STATE_FIRST_FULL: u32 = STATE_LOCKED_WAITERS + 1;
 
@@ -158,6 +161,28 @@ unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
         }
     }
 
+    unsafe fn try_fill_state<T>(
+        &self,
+        state_cell: &Self::StateCell,
+        new_full_state: Self::FullState,
+        write_target: NonNull<T>,
+        write_value: T,
+    ) -> Result<(), TryFillStateFailed<Self::FullState, T>> {
+        match self.lock_state(state_cell) {
+            Ok(()) => {
+                write_target.as_ptr().write(write_value);
+                self.unlock_and_fill_state(state_cell, new_full_state);
+                Ok(())
+            }
+            Err(read_state) => Err(TryFillStateFailed {
+                read_state,
+                write_value,
+            }),
+        }
+    }
+}
+
+unsafe impl<W: WaitWake> LockableHashTableImpl for SyncHashTableImpl<W> {
     unsafe fn lock_state(&self, state_cell: &Self::StateCell) -> Result<(), Self::FullState> {
         let state = state_cell.load(Ordering::Acquire);
         if state >= STATE_FIRST_FULL {

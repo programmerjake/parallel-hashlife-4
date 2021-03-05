@@ -1,7 +1,5 @@
-use super::{HashTableImpl, IndexCell, TryFillStateFailed, STATE_EMPTY, STATE_LOCKED};
+use super::{HashTableImpl, IndexCell, TryFillStateFailed};
 use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
-
-const STATE_FIRST_FULL: u32 = STATE_LOCKED + 1;
 
 impl IndexCell for Cell<usize> {
     const ZERO: Self = Cell::new(0);
@@ -40,14 +38,16 @@ impl IndexCell for Cell<usize> {
 #[derive(Clone, Copy, Default, Debug)]
 pub struct UnsyncHashTableImpl;
 
+const STATE_FIRST_FULL: u32 = 1;
+
 unsafe impl HashTableImpl for UnsyncHashTableImpl {
     type FullState = NonZeroU32;
 
-    type StateCell = Cell<u32>;
+    type StateCell = Cell<Option<NonZeroU32>>;
 
     type IndexCell = Cell<usize>;
 
-    const STATE_CELL_EMPTY: Self::StateCell = Cell::new(STATE_EMPTY);
+    const STATE_CELL_EMPTY: Self::StateCell = Cell::new(None);
 
     #[inline(always)]
     fn make_full_state(hash: u64) -> Self::FullState {
@@ -56,41 +56,7 @@ unsafe impl HashTableImpl for UnsyncHashTableImpl {
 
     #[inline(always)]
     fn read_state(state_cell: &Self::StateCell) -> Option<Self::FullState> {
-        let retval = state_cell.get();
-        if retval >= STATE_FIRST_FULL {
-            Some(NonZeroU32::new(retval).unwrap())
-        } else {
-            None
-        }
-    }
-
-    unsafe fn lock_state(&self, state_cell: &Self::StateCell) -> Result<(), Self::FullState> {
-        let state = state_cell.get();
-        if state >= STATE_FIRST_FULL {
-            Err(NonZeroU32::new(state).unwrap())
-        } else {
-            assert_eq!(
-                state_cell.replace(STATE_LOCKED),
-                STATE_EMPTY,
-                "attempt to lock already locked UnsyncHashTable entry"
-            );
-            Ok(())
-        }
-    }
-
-    unsafe fn unlock_and_fill_state(
-        &self,
-        state_cell: &Self::StateCell,
-        full_state: Self::FullState,
-    ) {
-        debug_assert!(full_state.get() >= STATE_FIRST_FULL);
-        let state = state_cell.replace(full_state.get());
-        debug_assert_eq!(state, STATE_LOCKED);
-    }
-
-    unsafe fn unlock_and_empty_state(&self, state_cell: &Self::StateCell) {
-        let state = state_cell.replace(STATE_EMPTY);
-        debug_assert_eq!(state, STATE_LOCKED);
+        state_cell.get()
     }
 
     unsafe fn try_fill_state<T>(
@@ -101,18 +67,14 @@ unsafe impl HashTableImpl for UnsyncHashTableImpl {
         write_value: T,
     ) -> Result<(), TryFillStateFailed<Self::FullState, T>> {
         let state = state_cell.get();
-        if state >= STATE_FIRST_FULL {
+        if let Some(state) = state {
             Err(TryFillStateFailed {
-                read_state: NonZeroU32::new(state).unwrap(),
+                read_state: state,
                 write_value,
             })
         } else {
-            assert_eq!(
-                state, STATE_EMPTY,
-                "attempt to lock already locked UnsyncHashTable entry"
-            );
             write_target.as_ptr().write(write_value);
-            state_cell.set(new_full_state.get());
+            state_cell.set(Some(new_full_state));
             Ok(())
         }
     }

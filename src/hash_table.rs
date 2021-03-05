@@ -53,6 +53,16 @@ pub unsafe trait HashTableImpl: sealed::Sealed {
     fn read_state_nonatomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
         Self::read_state(state_cell)
     }
+    unsafe fn try_fill_state<T>(
+        &self,
+        state_cell: &Self::StateCell,
+        new_full_state: Self::FullState,
+        write_target: NonNull<T>,
+        write_value: T,
+    ) -> Result<(), TryFillStateFailed<Self::FullState, T>>;
+}
+
+pub unsafe trait LockableHashTableImpl: HashTableImpl {
     unsafe fn lock_state(&self, state_cell: &Self::StateCell) -> Result<(), Self::FullState>;
     unsafe fn unlock_and_fill_state(
         &self,
@@ -60,29 +70,7 @@ pub unsafe trait HashTableImpl: sealed::Sealed {
         full_state: Self::FullState,
     );
     unsafe fn unlock_and_empty_state(&self, state_cell: &Self::StateCell);
-    unsafe fn try_fill_state<T>(
-        &self,
-        state_cell: &Self::StateCell,
-        new_full_state: Self::FullState,
-        write_target: NonNull<T>,
-        write_value: T,
-    ) -> Result<(), TryFillStateFailed<Self::FullState, T>> {
-        match self.lock_state(state_cell) {
-            Ok(()) => {
-                write_target.as_ptr().write(write_value);
-                self.unlock_and_fill_state(state_cell, new_full_state);
-                Ok(())
-            }
-            Err(read_state) => Err(TryFillStateFailed {
-                read_state,
-                write_value,
-            }),
-        }
-    }
 }
-
-const STATE_EMPTY: u32 = 0;
-const STATE_LOCKED: u32 = STATE_EMPTY + 1;
 
 #[inline(always)]
 fn make_full_state<const STATE_FIRST_FULL: u32>(hash: u64) -> NonZeroU32 {
@@ -357,14 +345,14 @@ impl<HTI: HashTableImpl, Value: fmt::Debug> fmt::Debug for HashTable<HTI, Value>
     }
 }
 
-pub struct LockedEntry<'a, HTI: HashTableImpl, Value> {
+pub struct LockedEntry<'a, HTI: LockableHashTableImpl, Value> {
     state_cell: &'a HTI::StateCell,
     value: &'a UnsafeCell<MaybeUninit<Value>>,
     full_state: HTI::FullState,
     hash_table_impl: &'a HTI,
 }
 
-impl<'a, HTI: HashTableImpl, Value> LockedEntry<'a, HTI, Value> {
+impl<'a, HTI: LockableHashTableImpl, Value> LockedEntry<'a, HTI, Value> {
     pub fn fill(self, value: Value) -> &'a Value {
         let state_cell = self.state_cell;
         let value_cell = self.value;
@@ -379,13 +367,13 @@ impl<'a, HTI: HashTableImpl, Value> LockedEntry<'a, HTI, Value> {
     }
 }
 
-impl<HTI: HashTableImpl, Value> Drop for LockedEntry<'_, HTI, Value> {
+impl<HTI: LockableHashTableImpl, Value> Drop for LockedEntry<'_, HTI, Value> {
     fn drop(&mut self) {
         unsafe { self.hash_table_impl.unlock_and_empty_state(self.state_cell) }
     }
 }
 
-pub enum LockResult<'a, HTI: HashTableImpl, Value> {
+pub enum LockResult<'a, HTI: LockableHashTableImpl, Value> {
     Vacant(LockedEntry<'a, HTI, Value>),
     Full(&'a Value),
 }
@@ -513,7 +501,10 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
         &'a self,
         hash: u64,
         mut entry_eq: F,
-    ) -> Result<(usize, LockResult<'a, HTI, Value>), NotEnoughSpace> {
+    ) -> Result<(usize, LockResult<'a, HTI, Value>), NotEnoughSpace>
+    where
+        HTI: LockableHashTableImpl,
+    {
         let full_state = HTI::make_full_state(hash);
         for (index, state_cell, value) in self.probe_sequence(hash) {
             unsafe {
@@ -871,7 +862,7 @@ mod test {
 
     #[test]
     fn arena_test() {
-        let ht: unsync::HashTable<EntryWithLifetime<'_>> = unsync::HashTable::new(2);
+        let ht: sync::HashTable<EntryWithLifetime<'_>> = sync::HashTable::new(2);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &EntryWithLifetime<'_>| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -913,7 +904,7 @@ mod test {
     fn drop_test() {
         let item1_count = AtomicUsize::new(0);
         let item2_count = AtomicUsize::new(0);
-        let ht: unsync::HashTable<(Entry, DropTestHelper<'_>)> = unsync::HashTable::new(6);
+        let ht: sync::HashTable<(Entry, DropTestHelper<'_>)> = sync::HashTable::new(6);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &Entry| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -945,7 +936,7 @@ mod test {
 
     #[test]
     fn test1() {
-        let ht: unsync::HashTable<Entry> = unsync::HashTable::new(6);
+        let ht: sync::HashTable<Entry> = sync::HashTable::new(6);
         let hasher = DefaultHashBuilder::new();
         let hasher = |entry: &Entry| -> u64 {
             let mut hasher = hasher.build_hasher();
@@ -975,6 +966,67 @@ mod test {
                     }
                 }
                 2 => {
+                    let entry = Entry::new();
+                    match ht.get_or_insert(
+                        hasher(&entry),
+                        |_index, v, entry| v == entry,
+                        entry.clone(),
+                    ) {
+                        Ok(GetOrInsertOutput {
+                            index: _,
+                            value: filled_entry,
+                            uninserted_value: None,
+                        }) => {
+                            assert_eq!(*filled_entry, entry);
+                            assert!(
+                                reference_ht.insert(entry.clone()),
+                                "failed to insert {:?}",
+                                entry
+                            );
+                        }
+                        Ok(GetOrInsertOutput {
+                            index: _,
+                            value: old_entry,
+                            uninserted_value: Some(new_entry),
+                        }) => {
+                            assert_eq!(reference_ht.get(&entry), Some(old_entry));
+                            assert_eq!(entry, new_entry);
+                        }
+                        Err(super::NotEnoughSpace) => {
+                            assert!(reference_ht.len() >= ht.probe_distance());
+                        }
+                    }
+                }
+                _ => {
+                    for _ in 0..10 {
+                        let entry = Entry::new();
+                        assert_eq!(
+                            ht.find(hasher(&entry), |_index, v| *v == entry)
+                                .map(|v| v.1),
+                            reference_ht.get(&entry)
+                        );
+                    }
+                }
+            }
+        }
+        let entries: Vec<Entry> = ht.iter().map(|v| v.1).cloned().collect();
+        let entries2: Vec<Entry> = ht.into_iter().collect();
+        assert_eq!(entries, entries2);
+    }
+
+    #[test]
+    fn test2() {
+        let ht: unsync::HashTable<Entry> = unsync::HashTable::new(6);
+        let hasher = DefaultHashBuilder::new();
+        let hasher = |entry: &Entry| -> u64 {
+            let mut hasher = hasher.build_hasher();
+            entry.hash(&mut hasher);
+            hasher.finish()
+        };
+        let mut reference_ht = HashSet::<Entry>::new();
+        for i in 0..100000u64 {
+            match i.wrapping_mul(0xA331_ABB2_E016_BC0A_u64) >> 62 {
+                1 => {
                     let entry = Entry::new();
                     match ht.get_or_insert(
                         hasher(&entry),
