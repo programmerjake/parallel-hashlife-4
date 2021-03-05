@@ -11,8 +11,10 @@ use crate::{
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     convert::{TryFrom, TryInto},
-    fmt,
+    debug_assert, fmt,
     hash::{BuildHasher, Hash, Hasher},
+    hint::unreachable_unchecked,
+    marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use hashbrown::hash_map::DefaultHashBuilder;
@@ -21,28 +23,39 @@ type LevelType = u16;
 type NonZeroLevelType = NonZeroU16;
 const LEVEL_COUNT: usize = LevelType::MAX as usize + 1;
 
-type Node<Leaf, IndexCell, const DIMENSION: usize> =
-    NodeOrLeaf<NodeData<IndexCell, DIMENSION>, Array<Leaf, 2, DIMENSION>>;
+type Node<'instance_tag, Leaf, IndexCell, const DIMENSION: usize> =
+    NodeOrLeaf<NodeData<'instance_tag, IndexCell, DIMENSION>, Array<Leaf, 2, DIMENSION>>;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[repr(C)]
+struct InstanceTag<'instance_tag>(PhantomData<fn(&'instance_tag ()) -> &'instance_tag ()>);
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct NodeId {
+pub struct NodeId<'instance_tag> {
     index_plus_1: NonZeroUsize,
+    _instance_tag: InstanceTag<'instance_tag>,
 }
 
-impl NodeId {
+impl<'instance_tag> NodeId<'instance_tag> {
     #[inline]
     fn index(self) -> usize {
         self.index_plus_1.get() - 1
     }
-    fn from_index(index: usize) -> Self {
+    /// # Safety
+    /// `index` must be less than `Parallel::capacity` for the `Parallel` associated with `instance_tag`.
+    /// The entry at `index` in the `Parallel` associated with `instance_tag` must be occupied.
+    unsafe fn from_index(index: usize, instance_tag: InstanceTag<'instance_tag>) -> Self {
+        let index_plus_1 = index.wrapping_add(1);
+        debug_assert_ne!(index_plus_1, 0);
         Self {
-            index_plus_1: NonZeroUsize::new(index.wrapping_add(1)).expect("index too big"),
+            index_plus_1: NonZeroUsize::new_unchecked(index_plus_1),
+            _instance_tag: instance_tag,
         }
     }
 }
 
-impl fmt::Debug for NodeId {
+impl<'instance_tag> fmt::Debug for NodeId<'instance_tag> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeId")
             .field("index", &self.index())
@@ -51,24 +64,39 @@ impl fmt::Debug for NodeId {
 }
 
 #[repr(transparent)]
-struct AtomicOptionNodeId<IndexCellT: IndexCell>(IndexCellT);
+struct AtomicOptionNodeId<'instance_tag, IndexCellT: IndexCell> {
+    index_cell: IndexCellT,
+    instance_tag: InstanceTag<'instance_tag>,
+}
 
-impl<IndexCellT: IndexCell> AtomicOptionNodeId<IndexCellT> {
-    const NONE: Self = Self(IndexCellT::ZERO);
-    fn get(&self) -> Option<NodeId> {
+impl<'instance_tag, IndexCellT: IndexCell> AtomicOptionNodeId<'instance_tag, IndexCellT> {
+    #[inline(always)]
+    fn none(instance_tag: InstanceTag<'instance_tag>) -> Self {
+        Self {
+            index_cell: IndexCellT::ZERO,
+            instance_tag,
+        }
+    }
+    fn get(&self) -> Option<NodeId<'instance_tag>> {
         Some(NodeId {
-            index_plus_1: NonZeroUsize::new(self.0.get())?,
+            index_plus_1: NonZeroUsize::new(self.index_cell.get())?,
+            _instance_tag: self.instance_tag,
         })
     }
-    fn replace(&self, v: Option<NodeId>) -> Option<NodeId> {
-        let retval = self.0.replace(v.map(|v| v.index_plus_1.get()).unwrap_or(0));
+    fn replace(&self, v: Option<NodeId<'instance_tag>>) -> Option<NodeId<'instance_tag>> {
+        let retval = self
+            .index_cell
+            .replace(v.map(|v| v.index_plus_1.get()).unwrap_or(0));
         Some(NodeId {
             index_plus_1: NonZeroUsize::new(retval)?,
+            _instance_tag: self.instance_tag,
         })
     }
 }
 
-impl<IndexCellT: IndexCell> fmt::Debug for AtomicOptionNodeId<IndexCellT> {
+impl<'instance_tag, IndexCellT: IndexCell> fmt::Debug
+    for AtomicOptionNodeId<'instance_tag, IndexCellT>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("AtomicOptionNodeId")
             .field(&self.get())
@@ -76,19 +104,20 @@ impl<IndexCellT: IndexCell> fmt::Debug for AtomicOptionNodeId<IndexCellT> {
     }
 }
 
-struct NodeData<IndexCellT, const DIMENSION: usize>
+struct NodeData<'instance_tag, IndexCellT, const DIMENSION: usize>
 where
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexCellT: IndexCell,
 {
-    key: Array<NodeId, 2, DIMENSION>,
+    key: Array<NodeId<'instance_tag>, 2, DIMENSION>,
     level: NonZeroLevelType,
-    next: AtomicOptionNodeId<IndexCellT>,
+    next: AtomicOptionNodeId<'instance_tag, IndexCellT>,
 }
 
-impl<IndexCellT, const DIMENSION: usize> fmt::Debug for NodeData<IndexCellT, DIMENSION>
+impl<'instance_tag, IndexCellT, const DIMENSION: usize> fmt::Debug
+    for NodeData<'instance_tag, IndexCellT, DIMENSION>
 where
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     IndexCellT: IndexCell,
 {
@@ -100,9 +129,10 @@ where
     }
 }
 
-impl<IndexCellT, const DIMENSION: usize> PartialEq for NodeData<IndexCellT, DIMENSION>
+impl<'instance_tag, IndexCellT, const DIMENSION: usize> PartialEq
+    for NodeData<'instance_tag, IndexCellT, DIMENSION>
 where
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     IndexCellT: IndexCell,
 {
@@ -111,17 +141,19 @@ where
     }
 }
 
-impl<IndexCellT, const DIMENSION: usize> Eq for NodeData<IndexCellT, DIMENSION>
+impl<'instance_tag, IndexCellT, const DIMENSION: usize> Eq
+    for NodeData<'instance_tag, IndexCellT, DIMENSION>
 where
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     IndexCellT: IndexCell,
 {
 }
 
-impl<IndexCellT, const DIMENSION: usize> Hash for NodeData<IndexCellT, DIMENSION>
+impl<'instance_tag, IndexCellT, const DIMENSION: usize> Hash
+    for NodeData<'instance_tag, IndexCellT, DIMENSION>
 where
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     IndexCellT: IndexCell,
 {
@@ -130,35 +162,54 @@ where
     }
 }
 
-pub struct Parallel<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize>
+/// # Safety: relies on only having one instance of Parallel for every `'instance_tag`
+pub struct Builder<'instance_tag>(InstanceTag<'instance_tag>);
+
+#[inline]
+pub fn make_builder<R, F: for<'instance_tag> FnOnce(Builder<'instance_tag>) -> R>(f: F) -> R {
+    let instance_tag = ();
+    #[inline]
+    fn make_builder<'instance_tag>(_: &'instance_tag ()) -> Builder<'instance_tag> {
+        Builder(InstanceTag(PhantomData))
+    }
+    let builder = make_builder(&instance_tag);
+    f(builder)
+}
+
+pub struct Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize>
 where
     LeafStepT: HasLeafType<DIMENSION>,
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     HTI: HashTableImpl,
 {
-    hash_table: HashTable<HTI, Node<LeafStepT::Leaf, HTI::IndexCell, DIMENSION>>,
+    hash_table: HashTable<HTI, Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION>>,
     hasher: DefaultHashBuilder,
-    empty_nodes: Box<[AtomicOptionNodeId<HTI::IndexCell>; LEVEL_COUNT]>,
+    empty_nodes: Box<[AtomicOptionNodeId<'instance_tag, HTI::IndexCell>; LEVEL_COUNT]>,
     leaf_step: LeafStepT,
     array_builder: ArrayBuilder,
 }
 
-impl<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize>
-    Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+impl<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize>
+    Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: HasLeafType<DIMENSION>,
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     HTI: HashTableImpl,
 {
     fn from_hash_table(
         leaf_step: LeafStepT,
         array_builder: ArrayBuilder,
-        hash_table: HashTable<HTI, Node<LeafStepT::Leaf, HTI::IndexCell, DIMENSION>>,
+        hash_table: HashTable<HTI, Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION>>,
+        instance_tag: InstanceTag<'instance_tag>,
     ) -> Self {
         let mut empty_nodes = Vec::with_capacity(LEVEL_COUNT);
-        empty_nodes.resize_with(LEVEL_COUNT, || AtomicOptionNodeId::NONE);
+        empty_nodes.resize_with(
+            LEVEL_COUNT,
+            #[inline(always)]
+            || AtomicOptionNodeId::none(instance_tag),
+        );
         Self {
             hash_table,
             hasher: DefaultHashBuilder::new(),
@@ -168,6 +219,7 @@ where
         }
     }
     pub fn with_hash_table_impl(
+        builder: Builder<'instance_tag>,
         leaf_step: LeafStepT,
         array_builder: ArrayBuilder,
         log2_capacity: u32,
@@ -177,9 +229,11 @@ where
             leaf_step,
             array_builder,
             HashTable::with_impl(log2_capacity, hash_table_impl),
+            builder.0,
         )
     }
     pub fn with_hash_table_impl_and_probe_distance(
+        builder: Builder<'instance_tag>,
         leaf_step: LeafStepT,
         array_builder: ArrayBuilder,
         log2_capacity: u32,
@@ -190,6 +244,7 @@ where
             leaf_step,
             array_builder,
             HashTable::with_impl_and_probe_distance(log2_capacity, hash_table_impl, probe_distance),
+            builder.0,
         )
     }
     pub fn capacity(&self) -> usize {
@@ -212,46 +267,46 @@ where
     }
 }
 
-impl<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HasNodeType<DIMENSION>
-    for Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+impl<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HasNodeType<DIMENSION>
+    for Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: HasLeafType<DIMENSION>,
-    NodeId: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    Array<NodeId<'instance_tag>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     HTI: HashTableImpl,
 {
-    type NodeId = NodeId;
+    type NodeId = NodeId<'instance_tag>;
 }
 
-impl<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HasLeafType<DIMENSION>
-    for Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+impl<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HasLeafType<DIMENSION>
+    for Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: HasLeafType<DIMENSION>,
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     HTI: HashTableImpl,
 {
     type Leaf = LeafStepT::Leaf;
 }
 
-impl<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HasErrorType
-    for Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+impl<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HasErrorType
+    for Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: HasLeafType<DIMENSION> + HasErrorType,
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     HTI: HashTableImpl,
 {
     type Error = LeafStepT::Error;
 }
 
-impl<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> LeafStep<DIMENSION>
-    for Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+impl<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> LeafStep<DIMENSION>
+    for Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: LeafStep<DIMENSION>,
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     HTI: HashTableImpl,
 {
@@ -263,13 +318,20 @@ where
     }
 }
 
-unsafe impl<T, LeafStepT, ArrayBuilder, HTI, const LENGTH: usize, const DIMENSION: usize>
-    ParallelBuildArray<T, LeafStepT::Error, LENGTH, DIMENSION>
-    for Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+unsafe impl<
+        'instance_tag,
+        T,
+        LeafStepT,
+        ArrayBuilder,
+        HTI,
+        const LENGTH: usize,
+        const DIMENSION: usize,
+    > ParallelBuildArray<T, LeafStepT::Error, LENGTH, DIMENSION>
+    for Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: HasLeafType<DIMENSION> + HasErrorType,
     ArrayBuilder: ParallelBuildArray<T, LeafStepT::Error, LENGTH, DIMENSION>,
-    NodeId: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     T: ArrayRepr<LENGTH, DIMENSION> + Send,
     IndexVec<DIMENSION>: IndexVecExt,
@@ -284,21 +346,36 @@ where
     }
 }
 
-impl<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize>
-    Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+impl<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize>
+    Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: LeafStep<DIMENSION>,
     LeafStepT::Leaf: Hash + Eq,
-    NodeId: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    Array<NodeId<'instance_tag>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     LeafStepT::Error: From<NotEnoughSpace>,
     HTI: HashTableImpl,
 {
     #[inline(always)]
-    fn get_node_level(&self, node_id: NodeId) -> usize {
-        match self.hash_table.index(node_id.index()).unwrap() {
+    fn get_node(
+        &self,
+        node_id: NodeId<'instance_tag>,
+    ) -> &Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION> {
+        unsafe {
+            let retval = self.hash_table.index_unchecked(node_id.index());
+            debug_assert!(retval.is_some());
+            if let Some(retval) = retval {
+                retval
+            } else {
+                unreachable_unchecked()
+            }
+        }
+    }
+    #[inline(always)]
+    fn get_node_level(&self, node_id: NodeId<'instance_tag>) -> usize {
+        match self.get_node(node_id) {
             NodeOrLeaf::Node(v) => v.level.get().into(),
             NodeOrLeaf::Leaf(_) => 0,
         }
@@ -306,8 +383,8 @@ where
     #[inline(always)]
     fn intern_node(
         &self,
-        node: Node<LeafStepT::Leaf, HTI::IndexCell, DIMENSION>,
-    ) -> Result<NodeId, LeafStepT::Error> {
+        node: Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION>,
+    ) -> Result<NodeId<'instance_tag>, LeafStepT::Error> {
         let mut hasher = self.hasher.build_hasher();
         node.hash(&mut hasher);
         let get_or_insert_output = self.hash_table.get_or_insert(
@@ -316,13 +393,19 @@ where
             |_index, v, node| v == node,
             node,
         )?;
-        Ok(NodeId::from_index(get_or_insert_output.index))
+        debug_assert!(get_or_insert_output.index < self.capacity());
+        unsafe {
+            Ok(NodeId::from_index(
+                get_or_insert_output.index,
+                InstanceTag::<'instance_tag>(PhantomData),
+            ))
+        }
     }
     #[cold]
     fn fill_empty_nodes(
         &self,
         target_level: usize,
-    ) -> Result<NodeAndLevel<NodeId>, LeafStepT::Error> {
+    ) -> Result<NodeAndLevel<NodeId<'instance_tag>>, LeafStepT::Error> {
         let mut start_node = None;
         for (i, node) in self.empty_nodes[0..target_level].iter().enumerate().rev() {
             if let Some(node) = node.get() {
@@ -349,13 +432,13 @@ where
     }
 }
 
-impl<LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HashlifeData<DIMENSION>
-    for Parallel<LeafStepT, ArrayBuilder, HTI, DIMENSION>
+impl<'instance_tag, LeafStepT, ArrayBuilder, HTI, const DIMENSION: usize> HashlifeData<DIMENSION>
+    for Parallel<'instance_tag, LeafStepT, ArrayBuilder, HTI, DIMENSION>
 where
     LeafStepT: LeafStep<DIMENSION>,
     LeafStepT::Leaf: Hash + Eq,
-    NodeId: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    NodeId<'instance_tag>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    Array<NodeId<'instance_tag>, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
     LeafStepT::Error: From<NotEnoughSpace>,
@@ -366,13 +449,14 @@ where
         &self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
+        assert!(key.level < LevelType::MAX as usize);
         let level: NonZeroLevelType = LevelType::try_from(key.level + 1)
             .unwrap()
             .try_into()
             .unwrap();
         IndexVec::<DIMENSION>::for_each_index(
             #[inline(always)]
-            |index| assert_eq!(self.get_node_level(key.node[index]), key.level),
+            |index| debug_assert_eq!(self.get_node_level(key.node[index]), key.level),
             2,
             ..,
         );
@@ -380,7 +464,7 @@ where
             node: self.intern_node(NodeOrLeaf::Node(NodeData {
                 key: key.node,
                 level,
-                next: AtomicOptionNodeId::NONE,
+                next: AtomicOptionNodeId::none(InstanceTag::<'instance_tag>(PhantomData)),
             }))?,
             level: level.get().into(),
         })
@@ -401,8 +485,8 @@ where
         node: NodeAndLevel<Self::NodeId>,
     ) -> NodeOrLeaf<NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>, Array<Self::Leaf, 2, DIMENSION>>
     {
-        assert_eq!(self.get_node_level(node.node), node.level);
-        match self.hash_table.index(node.node.index()).unwrap() {
+        debug_assert_eq!(self.get_node_level(node.node), node.level);
+        match self.get_node(node.node) {
             NodeOrLeaf::Node(node_data) => NodeOrLeaf::Node(NodeAndLevel {
                 node: node_data.key.clone(),
                 level: node.level - 1,
@@ -415,8 +499,8 @@ where
         &self,
         node: NodeAndLevel<Self::NodeId>,
     ) -> Option<NodeAndLevel<Self::NodeId>> {
-        assert_eq!(self.get_node_level(node.node), node.level);
-        match self.hash_table.index(node.node.index()).unwrap() {
+        debug_assert_eq!(self.get_node_level(node.node), node.level);
+        match self.get_node(node.node) {
             NodeOrLeaf::Leaf(_) => panic!("leaf nodes don't have a next field"),
             NodeOrLeaf::Node(node_data) => node_data.next.get().map(|next| NodeAndLevel {
                 node: next,
@@ -430,9 +514,9 @@ where
         node: NodeAndLevel<Self::NodeId>,
         new_next: NodeAndLevel<Self::NodeId>,
     ) {
-        assert_eq!(self.get_node_level(node.node), node.level);
-        assert_eq!(self.get_node_level(new_next.node), new_next.level);
-        match self.hash_table.index(node.node.index()).unwrap() {
+        debug_assert_eq!(self.get_node_level(node.node), node.level);
+        debug_assert_eq!(self.get_node_level(new_next.node), new_next.level);
+        match self.get_node(node.node) {
             NodeOrLeaf::Leaf(_) => panic!("leaf nodes don't have a next field"),
             NodeOrLeaf::Node(node_data) => {
                 assert_eq!(node.level - 1, new_next.level);
@@ -454,7 +538,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use super::{NodeId, Parallel};
+    use super::{make_builder, Builder, NodeId, Parallel};
     use crate::{
         array::Array,
         hash_table::{sync::SyncHashTableImpl, NotEnoughSpace},
@@ -498,9 +582,14 @@ mod test {
         }
     }
 
-    type HL = Parallel<LeafData, RayonParallel, SyncHashTableImpl<StdWaitWake>, DIMENSION>;
+    type HL<'instance_tag> =
+        Parallel<'instance_tag, LeafData, RayonParallel, SyncHashTableImpl<StdWaitWake>, DIMENSION>;
 
-    fn get_leaf(hl: &HL, mut node: NodeAndLevel<NodeId>, mut location: IndexVec<DIMENSION>) -> u8 {
+    fn get_leaf<'instance_tag>(
+        hl: &HL<'instance_tag>,
+        mut node: NodeAndLevel<NodeId<'instance_tag>>,
+        mut location: IndexVec<DIMENSION>,
+    ) -> u8 {
         loop {
             match hl.get_node_key(node) {
                 NodeOrLeaf::Node(key) => {
@@ -513,7 +602,11 @@ mod test {
         }
     }
 
-    fn dump_2d(hl: &HL, node: NodeAndLevel<NodeId>, title: &str) {
+    fn dump_2d<'instance_tag>(
+        hl: &HL<'instance_tag>,
+        node: NodeAndLevel<NodeId<'instance_tag>>,
+        title: &str,
+    ) {
         println!("{}:", title);
         let size = 2usize << node.level;
         for y in 0..size {
@@ -527,12 +620,12 @@ mod test {
         }
     }
 
-    fn build_2d_with_helper(
-        hl: &HL,
+    fn build_2d_with_helper<'instance_tag>(
+        hl: &HL<'instance_tag>,
         f: &mut impl FnMut(IndexVec<DIMENSION>) -> u8,
         outer_location: IndexVec<DIMENSION>,
         level: usize,
-    ) -> NodeAndLevel<NodeId> {
+    ) -> NodeAndLevel<NodeId<'instance_tag>> {
         if level == 0 {
             hl.intern_leaf_node(Array::build_array(|index| {
                 f(index + outer_location.map(|v| v * 2))
@@ -550,15 +643,18 @@ mod test {
         }
     }
 
-    fn build_2d_with(
-        hl: &HL,
+    fn build_2d_with<'instance_tag>(
+        hl: &HL<'instance_tag>,
         mut f: impl FnMut(IndexVec<DIMENSION>) -> u8,
         level: usize,
-    ) -> NodeAndLevel<NodeId> {
+    ) -> NodeAndLevel<NodeId<'instance_tag>> {
         build_2d_with_helper(hl, &mut f, 0usize.into(), level)
     }
 
-    fn build_2d<const SIZE: usize>(hl: &HL, array: [[u8; SIZE]; SIZE]) -> NodeAndLevel<NodeId> {
+    fn build_2d<'instance_tag, const SIZE: usize>(
+        hl: &HL<'instance_tag>,
+        array: [[u8; SIZE]; SIZE],
+    ) -> NodeAndLevel<NodeId<'instance_tag>> {
         assert!(SIZE.is_power_of_two());
         assert_ne!(SIZE, 1);
         let log2_size = SIZE.trailing_zeros();
@@ -567,8 +663,12 @@ mod test {
         build_2d_with(hl, |index| array[index], level)
     }
 
-    fn make_hashlife(delay: bool) -> HL {
+    fn make_hashlife<'instance_tag>(
+        delay: bool,
+        builder: Builder<'instance_tag>,
+    ) -> HL<'instance_tag> {
         HL::with_hash_table_impl(
+            builder,
             LeafData { delay },
             RayonParallel::default(),
             12,
@@ -578,49 +678,53 @@ mod test {
 
     #[test]
     fn test0() {
-        let hl = make_hashlife(false);
-        hl.get_empty_node(0).unwrap();
+        make_builder(|builder| {
+            let hl = make_hashlife(false, builder);
+            hl.get_empty_node(0).unwrap();
+        })
     }
 
     #[test]
     fn test1() {
-        let hl = make_hashlife(false);
-        let hl = &hl;
-        let empty0 = build_2d(hl, [[0, 0], [0, 0]]);
-        dump_2d(&hl, empty0.clone(), "empty0");
-        assert_eq!(
-            hl.intern_leaf_node(Array([[0, 0], [0, 0]])).unwrap(),
-            empty0
-        );
-        assert_eq!(hl.get_empty_node(0).unwrap(), empty0);
-        let node0 = build_2d(&hl, [[1, 1], [1, 1]]);
-        dump_2d(&hl, node0.clone(), "node0");
-        let node1 = hl
-            .intern_non_leaf_node(NodeAndLevel {
-                node: Array([
-                    [empty0.node.clone(), empty0.node.clone()],
-                    [empty0.node.clone(), node0.node.clone()],
-                ]),
-                level: 0,
-            })
-            .unwrap();
-        dump_2d(&hl, node1.clone(), "node1");
-        assert_eq!(
-            node1,
-            build_2d(
-                &hl,
-                [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 1], [0, 0, 1, 1]]
-            )
-        );
-        let node1_next = hl.recursive_hashlife_compute_node_next(node1, 0).unwrap();
-        dump_2d(&hl, node1_next.clone(), "node1_next");
-        assert_eq!(
-            hl.get_node_key(node1_next.clone()),
-            NodeOrLeaf::Leaf(Array([[0, 0], [0, 1]]))
-        );
+        make_builder(|builder| {
+            let hl = make_hashlife(false, builder);
+            let hl = &hl;
+            let empty0 = build_2d(hl, [[0, 0], [0, 0]]);
+            dump_2d(&hl, empty0.clone(), "empty0");
+            assert_eq!(
+                hl.intern_leaf_node(Array([[0, 0], [0, 0]])).unwrap(),
+                empty0
+            );
+            assert_eq!(hl.get_empty_node(0).unwrap(), empty0);
+            let node0 = build_2d(&hl, [[1, 1], [1, 1]]);
+            dump_2d(&hl, node0.clone(), "node0");
+            let node1 = hl
+                .intern_non_leaf_node(NodeAndLevel {
+                    node: Array([
+                        [empty0.node.clone(), empty0.node.clone()],
+                        [empty0.node.clone(), node0.node.clone()],
+                    ]),
+                    level: 0,
+                })
+                .unwrap();
+            dump_2d(&hl, node1.clone(), "node1");
+            assert_eq!(
+                node1,
+                build_2d(
+                    &hl,
+                    [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 1], [0, 0, 1, 1]]
+                )
+            );
+            let node1_next = hl.recursive_hashlife_compute_node_next(node1, 0).unwrap();
+            dump_2d(&hl, node1_next.clone(), "node1_next");
+            assert_eq!(
+                hl.get_node_key(node1_next.clone()),
+                NodeOrLeaf::Leaf(Array([[0, 0], [0, 1]]))
+            );
+        })
     }
 
-    fn make_step0(hl: &HL) -> NodeAndLevel<NodeId> {
+    fn make_step0<'instance_tag>(hl: &HL<'instance_tag>) -> NodeAndLevel<NodeId<'instance_tag>> {
         build_2d(
             hl,
             [
@@ -644,7 +748,7 @@ mod test {
         )
     }
 
-    fn make_step80(hl: &HL) -> NodeAndLevel<NodeId> {
+    fn make_step80<'instance_tag>(hl: &HL<'instance_tag>) -> NodeAndLevel<NodeId<'instance_tag>> {
         build_2d(
             hl,
             [
@@ -670,22 +774,24 @@ mod test {
 
     fn test_with_step_size(log2_step_size: usize) {
         for &delay in &[false, true] {
-            let hl = make_hashlife(delay);
-            let mut root = make_step0(&hl);
-            dump_2d(&hl, root.clone(), "root");
-            let mut step = 0u128;
-            while step < 80 {
-                root = hl.expand_root(root).unwrap();
-                root = hl
-                    .recursive_hashlife_compute_node_next(root, log2_step_size)
-                    .unwrap();
-                step += 1 << log2_step_size;
-                dbg!(step);
+            make_builder(|builder| {
+                let hl = make_hashlife(delay, builder);
+                let mut root = make_step0(&hl);
                 dump_2d(&hl, root.clone(), "root");
-            }
-            let expected = make_step80(&hl);
-            dump_2d(&hl, expected.clone(), "expected");
-            assert_eq!(root, expected);
+                let mut step = 0u128;
+                while step < 80 {
+                    root = hl.expand_root(root).unwrap();
+                    root = hl
+                        .recursive_hashlife_compute_node_next(root, log2_step_size)
+                        .unwrap();
+                    step += 1 << log2_step_size;
+                    dbg!(step);
+                    dump_2d(&hl, root.clone(), "root");
+                }
+                let expected = make_step80(&hl);
+                dump_2d(&hl, expected.clone(), "expected");
+                assert_eq!(root, expected);
+            })
         }
     }
 

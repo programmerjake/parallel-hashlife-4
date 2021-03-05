@@ -62,31 +62,46 @@ pub fn run_serial<LeafData, MapResult, R, const DIMENSION: usize>(
 where
     LeafData: LeafStep<DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    MapResult: FnOnce(
-        &parallel::Parallel<LeafData, (), hash_table::unsync::UnsyncHashTableImpl, DIMENSION>,
-        NodeAndLevel<parallel::NodeId>,
+    MapResult: for<'instance_tag> FnOnce(
+        &parallel::Parallel<
+            'instance_tag,
+            LeafData,
+            (),
+            hash_table::unsync::UnsyncHashTableImpl,
+            DIMENSION,
+        >,
+        NodeAndLevel<parallel::NodeId<'instance_tag>>,
     ) -> Result<R, LeafData::Error>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    parallel::NodeId: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<parallel::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    for<'instance_tag> parallel::NodeId<'instance_tag>:
+        ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    for<'instance_tag> Array<parallel::NodeId<'instance_tag>, 2, DIMENSION>:
+        ArrayRepr<2, DIMENSION>,
     LeafData::Error: From<std::io::Error> + From<NotEnoughSpace>,
     LeafData::Leaf: Eq + Hash + DeserializeOwned,
 {
-    let hl =
-        parallel::Parallel::with_hash_table_impl(leaf_data, (), log2_capacity, Default::default());
-    let mut root = MacrocellReader::new(macrocell_pattern.as_bytes())?.read_body(&hl)?;
-    if let Some(log2_step_size) = log2_step_size {
-        while root.level < log2_step_size {
+    parallel::make_builder(|builder| {
+        let hl = parallel::Parallel::with_hash_table_impl(
+            builder,
+            leaf_data,
+            (),
+            log2_capacity,
+            Default::default(),
+        );
+        let mut root = MacrocellReader::new(macrocell_pattern.as_bytes())?.read_body(&hl)?;
+        if let Some(log2_step_size) = log2_step_size {
+            while root.level < log2_step_size {
+                root = hl.expand_root(root)?;
+            }
             root = hl.expand_root(root)?;
+            root = crate::traits::serial::Hashlife::recursive_hashlife_compute_node_next(
+                &hl,
+                root,
+                log2_step_size,
+            )?;
         }
-        root = hl.expand_root(root)?;
-        root = crate::traits::serial::Hashlife::recursive_hashlife_compute_node_next(
-            &hl,
-            root,
-            log2_step_size,
-        )?;
-    }
-    map_result(&hl, root)
+        map_result(&hl, root)
+    })
 }
 
 pub fn run_parallel<LeafData, MapResult, R, const DIMENSION: usize>(
@@ -99,39 +114,46 @@ pub fn run_parallel<LeafData, MapResult, R, const DIMENSION: usize>(
 where
     LeafData: LeafStep<DIMENSION> + Sync,
     IndexVec<DIMENSION>: IndexVecExt,
-    MapResult: FnOnce(
+    MapResult: for<'instance_tag> FnOnce(
         &parallel::Parallel<
+            'instance_tag,
             LeafData,
             RayonParallel,
             hash_table::sync::SyncHashTableImpl<StdWaitWake>,
             DIMENSION,
         >,
-        NodeAndLevel<parallel::NodeId>,
+        NodeAndLevel<parallel::NodeId<'instance_tag>>,
     ) -> Result<R, LeafData::Error>,
     Array<LeafData::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
-    parallel::NodeId: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Option<parallel::NodeId>: ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
-    Array<parallel::NodeId, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
+    for<'instance_tag> parallel::NodeId<'instance_tag>:
+        ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    for<'instance_tag> Option<parallel::NodeId<'instance_tag>>:
+        ArrayRepr<2, DIMENSION> + ArrayRepr<3, DIMENSION>,
+    for<'instance_tag> Array<parallel::NodeId<'instance_tag>, 2, DIMENSION>:
+        ArrayRepr<2, DIMENSION>,
     LeafData::Error: From<std::io::Error> + From<NotEnoughSpace> + Send,
     LeafData::Leaf: Eq + Hash + DeserializeOwned + Sync + Send,
 {
-    let hl = parallel::Parallel::with_hash_table_impl(
-        leaf_data,
-        RayonParallel,
-        log2_capacity,
-        Default::default(),
-    );
-    let mut root = MacrocellReader::new(macrocell_pattern.as_bytes())?.read_body(&hl)?;
-    if let Some(log2_step_size) = log2_step_size {
-        while root.level < log2_step_size {
+    parallel::make_builder(|builder| {
+        let hl = parallel::Parallel::with_hash_table_impl(
+            builder,
+            leaf_data,
+            RayonParallel,
+            log2_capacity,
+            Default::default(),
+        );
+        let mut root = MacrocellReader::new(macrocell_pattern.as_bytes())?.read_body(&hl)?;
+        if let Some(log2_step_size) = log2_step_size {
+            while root.level < log2_step_size {
+                root = hl.expand_root(root)?;
+            }
             root = hl.expand_root(root)?;
+            root = crate::traits::parallel::Hashlife::recursive_hashlife_compute_node_next(
+                &hl,
+                root,
+                log2_step_size,
+            )?;
         }
-        root = hl.expand_root(root)?;
-        root = crate::traits::parallel::Hashlife::recursive_hashlife_compute_node_next(
-            &hl,
-            root,
-            log2_step_size,
-        )?;
-    }
-    map_result(&hl, root)
+        map_result(&hl, root)
+    })
 }
