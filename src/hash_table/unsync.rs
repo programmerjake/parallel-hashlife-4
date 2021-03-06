@@ -1,39 +1,48 @@
 use super::{HashTableImpl, IndexCell, TryFillStateFailed};
 use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
-impl IndexCell for Cell<usize> {
-    const ZERO: Self = Cell::new(0);
+macro_rules! impl_index_cell {
+    ($underlying:ty) => {
+        impl IndexCell for Cell<$underlying> {
+            const ZERO: Self = Cell::new(0);
 
-    #[inline(always)]
-    fn get_mut(&mut self) -> &mut usize {
-        self.get_mut()
-    }
+            type Underlying = $underlying;
 
-    #[inline(always)]
-    fn get(&self) -> usize {
-        self.get()
-    }
+            #[inline(always)]
+            fn get_mut(&mut self) -> &mut $underlying {
+                self.get_mut()
+            }
 
-    #[inline(always)]
-    fn replace(&self, v: usize) -> usize {
-        self.replace(v)
-    }
+            #[inline(always)]
+            fn get(&self) -> $underlying {
+                self.get()
+            }
 
-    #[inline(always)]
-    fn new(v: usize) -> Self {
-        Cell::new(v)
-    }
+            #[inline(always)]
+            fn replace(&self, v: $underlying) -> $underlying {
+                self.replace(v)
+            }
 
-    #[inline(always)]
-    fn into_inner(self) -> usize {
-        self.into_inner()
-    }
+            #[inline(always)]
+            fn new(v: $underlying) -> Self {
+                Cell::new(v)
+            }
 
-    #[inline(always)]
-    fn set(&self, v: usize) {
-        self.set(v)
-    }
+            #[inline(always)]
+            fn into_inner(self) -> $underlying {
+                self.into_inner()
+            }
+
+            #[inline(always)]
+            fn set(&self, v: $underlying) {
+                self.set(v)
+            }
+        }
+    };
 }
+
+impl_index_cell!(u32);
+impl_index_cell!(usize);
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct UnsyncHashTableImpl;
@@ -45,7 +54,9 @@ unsafe impl HashTableImpl for UnsyncHashTableImpl {
 
     type StateCell = Cell<Option<NonZeroU32>>;
 
-    type IndexCell = Cell<usize>;
+    type IndexCellUsize = Cell<usize>;
+
+    type IndexCellU32 = Cell<u32>;
 
     const STATE_CELL_EMPTY: Self::StateCell = Cell::new(None);
 

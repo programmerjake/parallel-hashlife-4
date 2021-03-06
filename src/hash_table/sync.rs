@@ -48,39 +48,48 @@ pub struct SyncHashTableImpl<W: WaitWake> {
     pub wait_waker: W,
 }
 
-impl IndexCell for AtomicUsize {
-    const ZERO: Self = AtomicUsize::new(0);
+macro_rules! impl_index_cell {
+    ($underlying:ty, $atomic_underlying:ty) => {
+        impl IndexCell for $atomic_underlying {
+            const ZERO: Self = <$atomic_underlying>::new(0);
 
-    #[inline(always)]
-    fn get_mut(&mut self) -> &mut usize {
-        self.get_mut()
-    }
+            type Underlying = $underlying;
 
-    #[inline(always)]
-    fn get(&self) -> usize {
-        self.load(Ordering::Acquire)
-    }
+            #[inline(always)]
+            fn get_mut(&mut self) -> &mut $underlying {
+                self.get_mut()
+            }
 
-    #[inline(always)]
-    fn replace(&self, v: usize) -> usize {
-        self.swap(v, Ordering::AcqRel)
-    }
+            #[inline(always)]
+            fn get(&self) -> $underlying {
+                self.load(Ordering::Acquire)
+            }
 
-    #[inline(always)]
-    fn new(v: usize) -> Self {
-        AtomicUsize::new(v)
-    }
+            #[inline(always)]
+            fn replace(&self, v: $underlying) -> $underlying {
+                self.swap(v, Ordering::AcqRel)
+            }
 
-    #[inline(always)]
-    fn into_inner(self) -> usize {
-        self.into_inner()
-    }
+            #[inline(always)]
+            fn new(v: $underlying) -> Self {
+                <$atomic_underlying>::new(v)
+            }
 
-    #[inline(always)]
-    fn set(&self, v: usize) {
-        self.store(v, Ordering::Release)
-    }
+            #[inline(always)]
+            fn into_inner(self) -> $underlying {
+                self.into_inner()
+            }
+
+            #[inline(always)]
+            fn set(&self, v: $underlying) {
+                self.store(v, Ordering::Release)
+            }
+        }
+    };
 }
+
+impl_index_cell!(u32, AtomicU32);
+impl_index_cell!(usize, AtomicUsize);
 
 impl<W: WaitWake> SyncHashTableImpl<W> {
     #[cold]
@@ -135,7 +144,9 @@ unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
 
     type StateCell = AtomicU32;
 
-    type IndexCell = AtomicUsize;
+    type IndexCellUsize = AtomicUsize;
+
+    type IndexCellU32 = AtomicU32;
 
     const STATE_CELL_EMPTY: Self::StateCell = AtomicU32::new(STATE_EMPTY);
 
@@ -152,7 +163,7 @@ unsafe impl<W: WaitWake> HashTableImpl for SyncHashTableImpl<W> {
         }
     }
 
-    fn read_state_nonatomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
+    fn read_state_non_atomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
         let retval = *state_cell.get_mut();
         if retval >= STATE_FIRST_FULL {
             Some(NonZeroU32::new(retval).unwrap())

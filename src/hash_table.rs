@@ -29,12 +29,13 @@ impl<W: sync::WaitWake> sealed::Sealed for sync::SyncHashTableImpl<W> {}
 
 pub trait IndexCell: 'static + Debug + Sized {
     const ZERO: Self;
-    fn get_mut(&mut self) -> &mut usize;
-    fn new(v: usize) -> Self;
-    fn into_inner(self) -> usize;
-    fn get(&self) -> usize;
-    fn replace(&self, v: usize) -> usize;
-    fn set(&self, v: usize);
+    type Underlying: 'static + Debug + Copy;
+    fn get_mut(&mut self) -> &mut Self::Underlying;
+    fn new(v: Self::Underlying) -> Self;
+    fn into_inner(self) -> Self::Underlying;
+    fn get(&self) -> Self::Underlying;
+    fn replace(&self, v: Self::Underlying) -> Self::Underlying;
+    fn set(&self, v: Self::Underlying);
 }
 
 #[derive(Debug)]
@@ -46,11 +47,12 @@ pub struct TryFillStateFailed<FullState, T> {
 pub unsafe trait HashTableImpl: sealed::Sealed {
     type FullState: 'static + Debug + Eq + Copy;
     type StateCell: 'static + Debug;
-    type IndexCell: IndexCell;
+    type IndexCellUsize: IndexCell<Underlying = usize>;
+    type IndexCellU32: IndexCell<Underlying = u32>;
     const STATE_CELL_EMPTY: Self::StateCell;
     fn make_full_state(hash: u64) -> Self::FullState;
     fn read_state(state_cell: &Self::StateCell) -> Option<Self::FullState>;
-    fn read_state_nonatomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
+    fn read_state_non_atomic(state_cell: &mut Self::StateCell) -> Option<Self::FullState> {
         Self::read_state(state_cell)
     }
     unsafe fn try_fill_state<T>(
@@ -330,7 +332,7 @@ impl<HTI: HashTableImpl, Value> HashTable<HTI, Value> {
         unsafe {
             let (state_cells, values) = self.storage.state_cells_values_mut::<HTI, Value>();
             let state_cell = state_cells.get_mut(index)?;
-            if HTI::read_state_nonatomic(state_cell).is_some() {
+            if HTI::read_state_non_atomic(state_cell).is_some() {
                 Some(&mut *(values[index].get() as *mut Value))
             } else {
                 None
@@ -564,7 +566,7 @@ impl<HTI: HashTableImpl, Value> Iterator for IntoIter<HTI, Value> {
     type Item = Value;
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((index, mut state_cell)) = self.state_cells.next() {
-            if HTI::read_state_nonatomic(&mut state_cell).is_some() {
+            if HTI::read_state_non_atomic(&mut state_cell).is_some() {
                 unsafe {
                     return Some(self.values[index].get().read().assume_init());
                 }
@@ -582,7 +584,7 @@ impl<HTI: HashTableImpl, Value> FusedIterator for IntoIter<HTI, Value> {}
 impl<HTI: HashTableImpl, Value> DoubleEndedIterator for IntoIter<HTI, Value> {
     fn next_back(&mut self) -> Option<Self::Item> {
         while let Some((index, mut state_cell)) = self.state_cells.next_back() {
-            if HTI::read_state_nonatomic(&mut state_cell).is_some() {
+            if HTI::read_state_non_atomic(&mut state_cell).is_some() {
                 unsafe {
                     return Some(self.values[index].get().read().assume_init());
                 }
@@ -755,7 +757,7 @@ impl<'a, HTI: HashTableImpl, Value> Iterator for IterMut<'a, HTI, Value> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(index) = self.range.next() {
             let state_cell = unsafe { &mut *self.state_cells.offset(index as isize) };
-            if HTI::read_state_nonatomic(state_cell).is_some() {
+            if HTI::read_state_non_atomic(state_cell).is_some() {
                 unsafe {
                     return Some((index, &mut *(self.values[index].get() as *mut Value)));
                 }
@@ -774,7 +776,7 @@ impl<'a, HTI: HashTableImpl, Value> DoubleEndedIterator for IterMut<'a, HTI, Val
     fn next_back(&mut self) -> Option<Self::Item> {
         while let Some(index) = self.range.next_back() {
             let state_cell = unsafe { &mut *self.state_cells.offset(index as isize) };
-            if HTI::read_state_nonatomic(state_cell).is_some() {
+            if HTI::read_state_non_atomic(state_cell).is_some() {
                 unsafe {
                     return Some((index, &mut *(self.values[index].get() as *mut Value)));
                 }

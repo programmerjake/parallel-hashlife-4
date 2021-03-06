@@ -15,13 +15,51 @@ use core::{
     hash::{BuildHasher, Hash, Hasher},
     hint::unreachable_unchecked,
     marker::PhantomData,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU32, TryFromIntError},
 };
 use hashbrown::hash_map::DefaultHashBuilder;
 
-type LevelType = u16;
-type NonZeroLevelType = NonZeroU16;
-const LEVEL_COUNT: usize = LevelType::MAX as usize + 1;
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+struct LevelType(u32);
+
+impl LevelType {
+    const MAX: Self = LevelType(0xFFF);
+    const fn value(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl TryFrom<usize> for LevelType {
+    type Error = TryFromIntError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        if value > Self::MAX.value() {
+            u32::try_from(!0u128)?;
+        }
+        Ok(Self(value as u32))
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+struct NonZeroLevelType(NonZeroU32);
+
+impl NonZeroLevelType {
+    const fn get(self) -> LevelType {
+        LevelType(self.0.get())
+    }
+}
+
+impl TryFrom<LevelType> for NonZeroLevelType {
+    type Error = TryFromIntError;
+
+    fn try_from(value: LevelType) -> Result<Self, Self::Error> {
+        Ok(NonZeroLevelType(value.0.try_into()?))
+    }
+}
+
+const LEVEL_COUNT: usize = 0x1000;
 
 type Node<'instance_tag, Leaf, IndexCell, const DIMENSION: usize> =
     NodeOrLeaf<NodeData<'instance_tag, IndexCell, DIMENSION>, Array<Leaf, 2, DIMENSION>>;
@@ -33,24 +71,34 @@ struct InstanceTag<'instance_tag>(PhantomData<fn(&'instance_tag ()) -> &'instanc
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct NodeId<'instance_tag> {
-    index_plus_1: NonZeroUsize,
-    _instance_tag: InstanceTag<'instance_tag>,
+    index: NodeIdUnderlying,
+    instance_tag: InstanceTag<'instance_tag>,
 }
 
+pub type NodeIdUnderlying = u32;
+
+const _: () = {
+    // assert NodeIdUnderlying is not bigger than usize
+    let too_big = NodeIdUnderlying::MAX as usize as NodeIdUnderlying != NodeIdUnderlying::MAX;
+    [0][too_big as usize];
+};
+
 impl<'instance_tag> NodeId<'instance_tag> {
+    const MAX_NODE_COUNT: usize = NodeIdUnderlying::MAX as usize;
+    const INVALID_INDEX: usize = Self::MAX_NODE_COUNT;
+    const MAX_INDEX: usize = Self::INVALID_INDEX - 1;
     #[inline]
     fn index(self) -> usize {
-        self.index_plus_1.get() - 1
+        self.index as usize
     }
     /// # Safety
     /// `index` must be less than `Parallel::capacity` for the `Parallel` associated with `instance_tag`.
     /// The entry at `index` in the `Parallel` associated with `instance_tag` must be occupied.
     unsafe fn from_index(index: usize, instance_tag: InstanceTag<'instance_tag>) -> Self {
-        let index_plus_1 = index.wrapping_add(1);
-        debug_assert_ne!(index_plus_1, 0);
+        debug_assert!(index <= Self::MAX_INDEX);
         Self {
-            index_plus_1: NonZeroUsize::new_unchecked(index_plus_1),
-            _instance_tag: instance_tag,
+            index: index as NodeIdUnderlying,
+            instance_tag: instance_tag,
         }
     }
 }
@@ -63,38 +111,98 @@ impl<'instance_tag> fmt::Debug for NodeId<'instance_tag> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-struct AtomicOptionNodeId<'instance_tag, IndexCellT: IndexCell> {
+pub struct OptionNodeId<'instance_tag> {
+    index: u32,
+    instance_tag: InstanceTag<'instance_tag>,
+}
+
+impl<'instance_tag> OptionNodeId<'instance_tag> {
+    pub const NONE: Self = OptionNodeId {
+        index: NodeId::INVALID_INDEX as u32,
+        instance_tag: InstanceTag(PhantomData),
+    };
+    pub const fn some(v: NodeId<'instance_tag>) -> Self {
+        Self {
+            index: v.index,
+            instance_tag: v.instance_tag,
+        }
+    }
+    pub const fn is_none(self) -> bool {
+        self.index == Self::NONE.index
+    }
+    pub const fn is_some(self) -> bool {
+        self.index != Self::NONE.index
+    }
+    pub const fn from(v: Option<NodeId<'instance_tag>>) -> Self {
+        match v {
+            None => Self::NONE,
+            Some(v) => Self::some(v),
+        }
+    }
+    pub const fn into(self) -> Option<NodeId<'instance_tag>> {
+        if self.is_some() {
+            Some(NodeId {
+                index: self.index,
+                instance_tag: self.instance_tag,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl<'instance_tag> From<Option<NodeId<'instance_tag>>> for OptionNodeId<'instance_tag> {
+    fn from(v: Option<NodeId<'instance_tag>>) -> Self {
+        OptionNodeId::from(v)
+    }
+}
+
+impl<'instance_tag> From<OptionNodeId<'instance_tag>> for Option<NodeId<'instance_tag>> {
+    fn from(v: OptionNodeId<'instance_tag>) -> Self {
+        v.into()
+    }
+}
+
+impl<'instance_tag> fmt::Debug for OptionNodeId<'instance_tag> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&Option::<NodeId<'instance_tag>>::from(*self), f)
+    }
+}
+
+#[repr(transparent)]
+struct AtomicOptionNodeId<'instance_tag, IndexCellT: IndexCell<Underlying = NodeIdUnderlying>> {
     index_cell: IndexCellT,
     instance_tag: InstanceTag<'instance_tag>,
 }
 
-impl<'instance_tag, IndexCellT: IndexCell> AtomicOptionNodeId<'instance_tag, IndexCellT> {
+impl<'instance_tag, IndexCellT: IndexCell<Underlying = NodeIdUnderlying>>
+    AtomicOptionNodeId<'instance_tag, IndexCellT>
+{
     #[inline(always)]
     fn none(instance_tag: InstanceTag<'instance_tag>) -> Self {
         Self {
-            index_cell: IndexCellT::ZERO,
+            index_cell: IndexCellT::new(OptionNodeId::NONE.index),
             instance_tag,
         }
     }
-    fn get(&self) -> Option<NodeId<'instance_tag>> {
-        Some(NodeId {
-            index_plus_1: NonZeroUsize::new(self.index_cell.get())?,
-            _instance_tag: self.instance_tag,
-        })
+    fn get(&self) -> OptionNodeId<'instance_tag> {
+        OptionNodeId {
+            index: self.index_cell.get(),
+            instance_tag: self.instance_tag,
+        }
     }
-    fn replace(&self, v: Option<NodeId<'instance_tag>>) -> Option<NodeId<'instance_tag>> {
-        let retval = self
-            .index_cell
-            .replace(v.map(|v| v.index_plus_1.get()).unwrap_or(0));
-        Some(NodeId {
-            index_plus_1: NonZeroUsize::new(retval)?,
-            _instance_tag: self.instance_tag,
-        })
+    fn replace(&self, v: OptionNodeId<'instance_tag>) -> OptionNodeId<'instance_tag> {
+        let index = self.index_cell.replace(v.index);
+        OptionNodeId {
+            index,
+            instance_tag: self.instance_tag,
+        }
     }
 }
 
-impl<'instance_tag, IndexCellT: IndexCell> fmt::Debug
+impl<'instance_tag, IndexCellT: IndexCell<Underlying = NodeIdUnderlying>> fmt::Debug
     for AtomicOptionNodeId<'instance_tag, IndexCellT>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -107,7 +215,7 @@ impl<'instance_tag, IndexCellT: IndexCell> fmt::Debug
 struct NodeData<'instance_tag, IndexCellT, const DIMENSION: usize>
 where
     NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
-    IndexCellT: IndexCell,
+    IndexCellT: IndexCell<Underlying = NodeIdUnderlying>,
 {
     key: Array<NodeId<'instance_tag>, 2, DIMENSION>,
     level: NonZeroLevelType,
@@ -119,7 +227,7 @@ impl<'instance_tag, IndexCellT, const DIMENSION: usize> fmt::Debug
 where
     NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    IndexCellT: IndexCell,
+    IndexCellT: IndexCell<Underlying = NodeIdUnderlying>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeData")
@@ -134,7 +242,7 @@ impl<'instance_tag, IndexCellT, const DIMENSION: usize> PartialEq
 where
     NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    IndexCellT: IndexCell,
+    IndexCellT: IndexCell<Underlying = NodeIdUnderlying>,
 {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key
@@ -146,7 +254,7 @@ impl<'instance_tag, IndexCellT, const DIMENSION: usize> Eq
 where
     NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    IndexCellT: IndexCell,
+    IndexCellT: IndexCell<Underlying = NodeIdUnderlying>,
 {
 }
 
@@ -155,7 +263,7 @@ impl<'instance_tag, IndexCellT, const DIMENSION: usize> Hash
 where
     NodeId<'instance_tag>: ArrayRepr<2, DIMENSION>,
     IndexVec<DIMENSION>: IndexVecExt,
-    IndexCellT: IndexCell,
+    IndexCellT: IndexCell<Underlying = NodeIdUnderlying>,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.key.hash(state);
@@ -183,9 +291,9 @@ where
     Array<LeafStepT::Leaf, 2, DIMENSION>: ArrayRepr<2, DIMENSION>,
     HTI: HashTableImpl,
 {
-    hash_table: HashTable<HTI, Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION>>,
+    hash_table: HashTable<HTI, Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCellU32, DIMENSION>>,
     hasher: DefaultHashBuilder,
-    empty_nodes: Box<[AtomicOptionNodeId<'instance_tag, HTI::IndexCell>; LEVEL_COUNT]>,
+    empty_nodes: Box<[AtomicOptionNodeId<'instance_tag, HTI::IndexCellU32>; LEVEL_COUNT]>,
     leaf_step: LeafStepT,
     array_builder: ArrayBuilder,
 }
@@ -201,9 +309,13 @@ where
     fn from_hash_table(
         leaf_step: LeafStepT,
         array_builder: ArrayBuilder,
-        hash_table: HashTable<HTI, Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION>>,
+        hash_table: HashTable<
+            HTI,
+            Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCellU32, DIMENSION>,
+        >,
         instance_tag: InstanceTag<'instance_tag>,
     ) -> Self {
+        assert!(hash_table.capacity() <= NodeId::MAX_NODE_COUNT);
         let mut empty_nodes = Vec::with_capacity(LEVEL_COUNT);
         empty_nodes.resize_with(
             LEVEL_COUNT,
@@ -362,7 +474,7 @@ where
     fn get_node(
         &self,
         node_id: NodeId<'instance_tag>,
-    ) -> &Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION> {
+    ) -> &Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCellU32, DIMENSION> {
         unsafe {
             let retval = self.hash_table.index_unchecked(node_id.index());
             debug_assert!(retval.is_some());
@@ -376,14 +488,14 @@ where
     #[inline(always)]
     fn get_node_level(&self, node_id: NodeId<'instance_tag>) -> usize {
         match self.get_node(node_id) {
-            NodeOrLeaf::Node(v) => v.level.get().into(),
+            NodeOrLeaf::Node(v) => v.level.get().value(),
             NodeOrLeaf::Leaf(_) => 0,
         }
     }
     #[inline(always)]
     fn intern_node(
         &self,
-        node: Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCell, DIMENSION>,
+        node: Node<'instance_tag, LeafStepT::Leaf, HTI::IndexCellU32, DIMENSION>,
     ) -> Result<NodeId<'instance_tag>, LeafStepT::Error> {
         let mut hasher = self.hasher.build_hasher();
         node.hash(&mut hasher);
@@ -408,7 +520,7 @@ where
     ) -> Result<NodeAndLevel<NodeId<'instance_tag>>, LeafStepT::Error> {
         let mut start_node = None;
         for (i, node) in self.empty_nodes[0..target_level].iter().enumerate().rev() {
-            if let Some(node) = node.get() {
+            if let Some(node) = node.get().into() {
                 start_node = Some(NodeAndLevel { node, level: i });
                 break;
             }
@@ -420,7 +532,10 @@ where
             None => self.intern_leaf_node(Array::default())?,
         };
         loop {
-            if let Some(old_node) = self.empty_nodes[node.level].replace(Some(node.node)) {
+            if let Some(old_node) = self.empty_nodes[node.level]
+                .replace(OptionNodeId::some(node.node))
+                .into()
+            {
                 assert_eq!(old_node, node.node);
             }
             if node.level == target_level {
@@ -449,7 +564,7 @@ where
         &self,
         key: NodeAndLevel<Array<Self::NodeId, 2, DIMENSION>>,
     ) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
-        assert!(key.level < LevelType::MAX as usize);
+        assert!(key.level < LevelType::MAX.value());
         let level: NonZeroLevelType = LevelType::try_from(key.level + 1)
             .unwrap()
             .try_into()
@@ -466,7 +581,7 @@ where
                 level,
                 next: AtomicOptionNodeId::none(InstanceTag::<'instance_tag>(PhantomData)),
             }))?,
-            level: level.get().into(),
+            level: level.get().value(),
         })
     }
     #[inline(always)]
@@ -502,7 +617,7 @@ where
         debug_assert_eq!(self.get_node_level(node.node), node.level);
         match self.get_node(node.node) {
             NodeOrLeaf::Leaf(_) => panic!("leaf nodes don't have a next field"),
-            NodeOrLeaf::Node(node_data) => node_data.next.get().map(|next| NodeAndLevel {
+            NodeOrLeaf::Node(node_data) => node_data.next.get().into().map(|next| NodeAndLevel {
                 node: next,
                 level: node.level - 1,
             }),
@@ -520,7 +635,11 @@ where
             NodeOrLeaf::Leaf(_) => panic!("leaf nodes don't have a next field"),
             NodeOrLeaf::Node(node_data) => {
                 assert_eq!(node.level - 1, new_next.level);
-                if let Some(old_next) = node_data.next.replace(Some(new_next.node)) {
+                if let Some(old_next) = node_data
+                    .next
+                    .replace(OptionNodeId::some(new_next.node))
+                    .into()
+                {
                     assert_eq!(old_next, new_next.node);
                 }
             }
@@ -528,7 +647,8 @@ where
     }
     #[inline(always)]
     fn get_empty_node(&self, level: usize) -> Result<NodeAndLevel<Self::NodeId>, Self::Error> {
-        if let Some(node) = self.empty_nodes[level].get() {
+        assert!(level < LEVEL_COUNT);
+        if let Some(node) = self.empty_nodes[level].get().into() {
             Ok(NodeAndLevel { node, level })
         } else {
             self.fill_empty_nodes(level)
