@@ -9,7 +9,7 @@ use test::Bencher;
 const PATTERN: &'static str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/patterns/primes.mc"));
 const LOG2_CAPACITY: u32 = 20;
-const LOG2_STEP_SIZE: usize = 8;
+const LOG2_STEP_SIZE: usize = 9;
 
 #[bench]
 fn serial_simple_bench(bencher: &mut Bencher) {
